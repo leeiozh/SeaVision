@@ -1,4 +1,32 @@
 import numpy as np
+from scipy.optimize import curve_fit
+
+
+def wind_direction(bck: np.ndarray, adp: int, asp: int) -> float:
+    """
+    Estimate wind direction from azimuthal backscatter intensity.
+    Fits I(θ) = a + b·cos²(0.5·(θ − c)) and returns c in degrees [0, 360).
+    """
+    intensity = bck[:, adp - asp: adp + asp].mean(axis=1).astype(float)
+    aap = len(intensity)
+    theta = np.linspace(0, 2 * np.pi, aap, endpoint=False)
+
+    def _model(x, a, b, c):
+        return a + b * np.cos(0.5 * (x - c)) ** 2
+
+    try:
+        a0 = float(intensity.mean())
+        b0 = float(intensity.max() - intensity.min())
+        c0 = float(theta[int(np.argmax(intensity))])
+        popt, _ = curve_fit(
+            _model, theta, intensity,
+            p0=[a0, b0, c0],
+            bounds=([0.0, 0.0, -np.pi], [255.0, 255.0, 3 * np.pi]),
+            maxfev=1000,
+        )
+        return float(np.degrees(popt[2]) % 360)
+    except Exception:
+        return 0.0
 
 
 def trim_segment(arr, index, num_area, AAP, ADP, ASP):

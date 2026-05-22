@@ -137,32 +137,38 @@ def parse_navi_packet(data: bytes) -> Navi:
 
 
 class Wave:
-    def __init__(self, snr: float, swh: int, dir: float, ddir: float, per: float, len: float, vco: float, inv: bool):
+    """
+    Wave system descriptor.
+    t_p  — peak period [s]
+    t_m  — mean period [s]
+    d_p  — peak direction [deg]
+    d_m  — mean direction [deg]
+    """
+    def __init__(self, snr: float = 0.0, swh: float = 0.0,
+                 t_p: float = 0.0, t_m: float = 0.0,
+                 d_p: float = 0.0, d_m: float = 0.0):
         self.snr = snr
         self.swh = swh
-        self.dir = dir
-        self.ddir = ddir
-        self.per = per
-        self.len = len
-        self.vco = vco
-        self.inv = inv
+        self.t_p = t_p
+        self.t_m = t_m
+        self.d_p = d_p
+        self.d_m = d_m
 
     def sum(self, other, size):
-        if np.isnan(other.per) or np.isinf(other.per):
-            pp = 0
-        else:
-            pp = other.per
-        if np.isnan(other.len) or np.isinf(other.len):
-            ll = 0
-        else:
-            ll = other.len
-        return Wave(snr=self.snr + other.snr / size, swh=self.swh + other.swh / size, dir=self.dir + other.dir / size,
-                    ddir=self.ddir + other.ddir / size, per=self.per + pp / size, len=self.len + ll / size,
-                    vco=self.vco + other.vco / size, inv=self.inv)
+        t_p = other.t_p if np.isfinite(other.t_p) else 0.0
+        t_m = other.t_m if np.isfinite(other.t_m) else 0.0
+        return Wave(
+            snr=self.snr + other.snr / size,
+            swh=self.swh + other.swh / size,
+            t_p=self.t_p + t_p / size,
+            t_m=self.t_m + t_m / size,
+            d_p=self.d_p + other.d_p / size,
+            d_m=self.d_m + other.d_m / size,
+        )
 
     def print(self):
-        return (f"{self.snr:.2f};{self.swh:.2f};{self.per:.2f};{self.dir:.0f};{self.ddir:.0f};{self.len:.0f};"
-                f"{self.vco:.2f};{self.inv};")
+        return (f"{self.swh:.2f};{self.t_p:.2f};"
+                f"{self.d_p:.0f};{self.d_m:.0f};{self.t_m:.2f};")
 
 
 class Output:
@@ -200,3 +206,35 @@ class WaveOutput:
         self.wave_sw2 = wave_sw2
         self.spec_1d = spec_1d
         self.spec_2d = spec_2d
+
+
+class CurrentOutput:
+    """2-D current velocity vector in geographic coordinates [m/s]."""
+    def __init__(self, u_x: float = 0.0, u_y: float = 0.0):
+        self.u_x = u_x
+        self.u_y = u_y
+
+    @property
+    def speed(self):
+        return float(np.hypot(self.u_x, self.u_y))
+
+    @property
+    def direction(self):
+        return float(np.degrees(np.arctan2(self.u_y, self.u_x)) % 360)
+
+
+class WindOutput:
+    """Wind direction and backscatter intensity proxy."""
+    def __init__(self, direction: float = 0.0, sig: float = 0.0):
+        self.direction = direction
+        self.sig = sig
+
+
+class ProcessResult:
+    """Single completed processing result passed from processor to output sinks."""
+    __slots__ = ("output", "port", "navi")
+
+    def __init__(self, output: "Output", port: np.ndarray, navi: "Navi"):
+        self.output = output
+        self.port = port
+        self.navi = navi

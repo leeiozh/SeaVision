@@ -11,6 +11,7 @@ class Constants:
     K_NUM: int
     N_SHOTS: int
     N_FREQ: int
+    N_DIRS: int
     NUM_AREA: int
     SNR_A: int
     SNR_B: int
@@ -45,6 +46,7 @@ def load_config(path: str) -> AppConfig:
         K_NUM=cfg.getint("constants", "K_NUM"),
         N_SHOTS=cfg.getint("constants", "N_SHOTS"),
         N_FREQ=cfg.getint("constants", "N_FREQ"),
+        N_DIRS=cfg.getint("constants", "N_DIRS"),
         NUM_AREA=cfg.getint("constants", "NUM_AREA"),
         SNR_A=cfg.getint("constants", "SNR_A"),
         SNR_B=cfg.getint("constants", "SNR_B"),

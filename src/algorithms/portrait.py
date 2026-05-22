@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.integrate import trapezoid
 from scipy.ndimage import gaussian_filter1d
 from src.algorithms.dispersion import dispersion_curve, find_curve
 
@@ -55,14 +56,14 @@ def process_portrait(port, inv, speed, freq_win, step, asp, k_num, om_max, n_sho
     k = k_idx / port_pr.shape[1] * k_max
     signal[:, 1:] *= (k ** (-1.2))
 
-    f_sig = np.trapz(signal, axis=1)
-    f_noi = np.trapz(noise, axis=1)
+    f_sig = trapezoid(signal, axis=1)
+    f_noi = trapezoid(noise, axis=1)
     spec_1d = gaussian_filter1d(f_sig / f_noi, sigma=2)
 
-    f_noi_trap = np.trapz(f_noi)
+    f_noi_trap = trapezoid(f_noi)
     spec1d_argmax = np.nanargmax(spec_1d)
     if f_noi_trap > 0:
-        m0 = np.trapz(f_sig) / f_noi_trap
+        m0 = trapezoid(f_sig) / f_noi_trap
     else:
         m0 = 0
     if spec1d_argmax > 0:

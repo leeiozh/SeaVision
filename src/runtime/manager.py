@@ -1,210 +1,246 @@
-from time import sleep
+from time import sleep, time
 from queue import Queue, Empty, Full
 from threading import Thread, Event, Lock
-from src.io.input import InputSource
+from src.io.structs import ProcessResult
 from src.runtime.logger import setup_logger
-from src.io.output import UdpOutputSink, CSVOutputSink
 
 log = setup_logger("manager")
 
 
-class Manager:
+def _drain(q: Queue):
+    while not q.empty():
+        try:
+            q.get_nowait()
+        except Empty:
+            break
 
-    def __init__(self, config, processor_factory, inp_source: InputSource, out_source: list):
+
+class Manager:
+    """
+    Three-thread pipeline: Input → Process → Output.
+
+    Fault model:
+      - Input timeout / EOF  → silent wait; after silence_threshold seconds marks reset_pending.
+      - Data resumes         → resets processor state before feeding new data.
+      - Processing exception → restarts processor thread immediately.
+      - Processor hang       → watchdog (10 × rotation_period) restarts processor thread.
+      - Output sink error    → logged per-sink, pipeline continues.
+    """
+
+    def __init__(self, config, processor_factory, inp_source, out_sinks: list):
         self.inp = inp_source
-        self.out = out_source
+        self.out = out_sinks
         self.cfg = config
 
         self.processor_factory = processor_factory
-        self.processor = self.processor_factory()
+        self.processor = None  # created in _start_processor
 
-        self.in_queue = Queue(maxsize=config.pipeline.queue_size)
-        self.out_queue = Queue(maxsize=config.pipeline.queue_size)
+        queue_size = config.pipeline.queue_size
+        self.in_queue: Queue = Queue(maxsize=queue_size)
+        self.out_queue: Queue = Queue(maxsize=queue_size)
 
         self.stop_ev = Event()
         self.proc_stop_ev = Event()
         self.proc_lock = Lock()
 
-        self.t_inp = None
-        self.t_out = None
+        rot_period = 60.0 / config.const.RPM
+        self._silence_threshold = config.const.N_SHOTS * rot_period
+        self._watchdog_timeout = 10.0 * rot_period
+
+        self._last_recv_time: float = 0.0
+        self._reset_pending: bool = False
+        self._proc_active_time: float = time()
+
+        self.t_inp: Thread = None
+        self.t_proc: Thread = None
+        self.t_out: Thread = None
+
+    # ── public API ────────────────────────────────────────────────────────────
 
     def start(self):
-        log.info("Starting manager")
+        log.info(
+            f"Starting manager  silence={self._silence_threshold:.0f}s  "
+            f"watchdog={self._watchdog_timeout:.0f}s"
+        )
         self._start_processor()
-
-        self.t_inp = Thread(target=self._input_loop, daemon=True)
-        self.t_out = Thread(target=self._output_loop, daemon=True)
-
+        self.t_inp = Thread(target=self._input_loop, name="Input", daemon=True)
+        self.t_out = Thread(target=self._output_loop, name="Output", daemon=True)
         self.t_inp.start()
         self.t_out.start()
 
-    def run(self):
-        self.start()
-        try:
-            while not self.stop_ev.is_set():
-                sleep(0.1)
-        except KeyboardInterrupt:
-            log.warning("Keyboard interrupt received")
-        finally:
-            self._shutdown()
-
     def stop(self):
         self._shutdown()
+
+    # ── processor lifecycle ───────────────────────────────────────────────────
 
     def _start_processor(self):
         with self.proc_lock:
             self.proc_stop_ev.clear()
             self.processor = self.processor_factory()
-            self.t_proc = Thread(target=self._process_loop, daemon=True)
+            self._proc_active_time = time()
+            self.t_proc = Thread(target=self._process_loop, name="Process", daemon=True)
             self.t_proc.start()
 
-    def _restart_processor(self, reason):
-        log.error(f"Restarting processor: {reason}")
-
+    def _restart_processor(self, reason: str):
         with self.proc_lock:
+            if self.proc_stop_ev.is_set():
+                return  # restart already in progress
             self.proc_stop_ev.set()
 
+        log.warning(f"Restarting processor: {reason}")
+        _drain(self.in_queue)
         sleep(0.1)
-
-        self._clear_queue(self.in_queue)
-        self._clear_queue(self.out_queue)
         self._start_processor()
 
-    @staticmethod
-    def _clear_queue(q):
-        while not q.empty():
-            try:
-                q.get_nowait()
-            except Empty:
-                break
+    # ── input thread ──────────────────────────────────────────────────────────
 
     def _input_loop(self):
-        try:
-            while not self.stop_ev.is_set():
+        log.info("Input thread started")
+        while not self.stop_ev.is_set():
+            try:
                 back = self.inp.get_bck()
+            except TimeoutError:
+                self._on_no_data()
+                continue
+            except Exception:
+                log.exception("Input error")
+                sleep(1.0)
+                continue
 
-                if back.step == 0.0:
-                    log.info("Input EOF reached, stopping application")
-                    self.stop_ev.set()
-                    self.in_queue.put((None, None))
-                    return
+            if back.step == 0.0:
+                # EOF from file source — no new data available yet
+                self._on_no_data()
+                sleep(1.0)
+                continue
 
-                navi = self.inp.get_navi()
-                log.info(f"Received Navi! Lat = {navi.lat}, Lon = {navi.lon}")
+            navi = self.inp.get_navi()
 
-                try:
-                    self.in_queue.put((back, navi))
-                    log.info(f"Data received: {self.processor.get_info()}")
-                except Full:
-                    self._restart_processor("Input queue overflow")
+            # Coming back from a silence period → reset stale processor state
+            if self._reset_pending:
+                log.info("Data resumed after silence — resetting processor state")
+                self._restart_processor("resumed after silence")
+                self._reset_pending = False
 
-        except Exception:
-            log.exception("Input thread crashed")
-            self.stop_ev.set()
+            self._last_recv_time = time()
+            self._check_processor_health()
 
-        finally:
-            log.warning("Input thread stopped")
+            try:
+                self.in_queue.put_nowait((back, navi))
+            except Full:
+                log.warning("Input queue full — frame dropped")
+
+        log.warning("Input thread stopped")
+
+    def _on_no_data(self):
+        if self._last_recv_time == 0.0:
+            return  # no data has ever arrived, nothing to reset
+        if not self._reset_pending and time() - self._last_recv_time > self._silence_threshold:
+            log.warning(
+                f"No data for >{self._silence_threshold:.0f}s — "
+                "processor state will reset on next data"
+            )
+            self._reset_pending = True
+
+    def _check_processor_health(self):
+        # Unexpected thread death
+        if (self.t_proc is not None
+                and not self.t_proc.is_alive()
+                and not self.proc_stop_ev.is_set()):
+            self._restart_processor("processor thread died unexpectedly")
+            return
+        # Hung processor (one update taking too long)
+        if time() - self._proc_active_time > self._watchdog_timeout:
+            log.error("Processor watchdog timeout")
+            self._restart_processor("watchdog timeout")
+
+    # ── process thread ────────────────────────────────────────────────────────
 
     def _process_loop(self):
         log.info("Process thread started")
-        try:
-            while not self.stop_ev.is_set() and not self.proc_stop_ev.is_set():
-                try:
-                    back, navi = self.in_queue.get()
-                    if back is None and navi is None:
-                        log.info("Processor received stop signal")
-                        self.out_queue.put(None)
-                        self.stop_ev.set()
-                        return
+        while not self.stop_ev.is_set() and not self.proc_stop_ev.is_set():
+            try:
+                item = self.in_queue.get(timeout=1.0)
+            except Empty:
+                continue
 
-                    result = self.processor.update(back, navi)
-                    if result["out"] is not None:
-                        self.out_queue.put(result)
-                        log.info(f"Params updated! Hs = {result['out'].wave_sum.swh:.2f}m, "
-                                 f"Tp = {result['out'].wave_sum.per:.1f}s, "
-                                 f"Dp = {result['out'].wave_sum.ddir:.0f}°")
+            back, navi = item
+            try:
+                result = self.processor.update(back, navi)
+                self._proc_active_time = time()
+            except Exception:
+                log.exception("Processing error")
+                self._restart_processor("processing exception")
+                return
 
-                except Empty:
-                    continue
+            if result["out"] is None:
+                continue
 
-                except Full:
-                    self._restart_processor("Output queue overflow")
-                    return
+            proc_result = ProcessResult(
+                output=result["out"],
+                port=result["port"],
+                navi=navi,
+            )
+            o = proc_result.output
+            log.info(
+                f"Hs={o.wave_sum.swh:.2f}m  "
+                f"Tp={o.wave_sum.t_p:.1f}s  "
+                f"Dp={o.wave_sum.d_p:.0f}°  "
+                f"Lam={getattr(o, 'lam_peak', 0)}m  "
+                f"Wdir={o.wave_win.d_p:.0f}°  "
+                f"Vcur={getattr(o, 'u_proj', 0.0):.2f}m/s  "
+                f"Nsys={o.ide_sys}"
+            )
+            try:
+                self.out_queue.put_nowait(proc_result)
+            except Full:
+                log.warning("Output queue full — result dropped")
 
-        except Exception:
-            log.exception("Processing error")
-            self._restart_processor("Processing exception")
-            return
+        log.warning("Process thread stopped")
 
-        finally:
-            # self.processor.stop()
-            log.warning("Processor thread stopped")
+    # ── output thread ─────────────────────────────────────────────────────────
 
     def _output_loop(self):
-        try:
-            while not self.stop_ev.is_set():
+        log.info("Output thread started")
+        while not self.stop_ev.is_set():
+            try:
+                result = self.out_queue.get(timeout=1.0)
+            except Empty:
+                continue
+
+            for sink in self.out:
                 try:
-                    data = self.out_queue.get()
-                    if data is None:
-                        log.info("Output received stop signal")
-                        self.stop_ev.set()
-                        return
-                    if data["out"] is not None:
-                        for sink in self.out:
-                            if isinstance(sink, UdpOutputSink):
-                                sink.send(data["out"])
-                            elif isinstance(sink, CSVOutputSink):
-                                sink.send(data["pulse"], data["step"],
-                                          data["out"].wave_sum,
-                                          data["out"].spec_1d, data["port"],
-                                          data["out"].spec_2d, data["navi"])
-                            else:
-                                pass
+                    sink.send(result)
+                except Exception:
+                    log.exception(f"Sink {type(sink).__name__} send error")
 
-                except Empty:
-                    continue
+        log.warning("Output thread stopped")
 
-        except Exception:
-            log.exception("Output thread error")
-            self.stop_ev.set()
-
-        finally:
-            log.warning("Output thread stopped")
+    # ── shutdown ──────────────────────────────────────────────────────────────
 
     def _shutdown(self):
         log.warning("Shutting down manager...")
-
         self.stop_ev.set()
         self.proc_stop_ev.set()
 
-        try:
-            self.in_queue.put_nowait((None, None))
-        except Full:
-            pass
-
-        try:
-            self.out_queue.put_nowait(None)
-        except Full:
-            pass
-
-        if self.t_inp and self.t_inp.is_alive():
-            self.t_inp.join(timeout=5)
-
-        if self.t_proc and self.t_proc.is_alive():
-            self.t_proc.join(timeout=5)
-
-        if self.t_out and self.t_out.is_alive():
-            self.t_out.join(timeout=5)
+        for t, name in [
+            (self.t_inp, "Input"),
+            (self.t_proc, "Process"),
+            (self.t_out, "Output"),
+        ]:
+            if t and t.is_alive():
+                t.join(timeout=5)
+                if t.is_alive():
+                    log.warning(f"{name} thread did not stop in time")
 
         try:
             self.inp.close()
         except Exception:
             pass
-        #
-        # for sink in self.out:
-        #     try:
-        #         sink.close()
-        #     except Exception:
-        #         pass
+
+        for sink in self.out:
+            try:
+                sink.close()
+            except Exception:
+                pass
 
         log.warning("Manager shutdown complete")

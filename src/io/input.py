@@ -7,6 +7,9 @@ from typing import Optional
 from src.io.service import create_inp_socket
 from src.io.structs import Navi, BackData, BackPack, \
     parse_navi_packet, parse_back_packet, ProtocolError, _NAV_PKT_SIZE, _BCK_PKT_SIZE, _BCK_PAYLOAD_SIZE
+from src.runtime.logger import setup_logger
+
+log = setup_logger("input")
 
 
 class InputSource:
@@ -64,8 +67,8 @@ class UdpInputSource(InputSource):
         try:
             self.back_socket.settimeout(timeout)
             data, _addr = self.back_socket.recvfrom(bufsize)
-        except socket.timeout as e:
-            raise TimeoutError("Socket timed out while waiting for backscatter packet") from e
+        except TimeoutError:
+            raise
         finally:
             self.back_socket.settimeout(old_timeout)
 
@@ -103,7 +106,7 @@ class UdpInputSource(InputSource):
 
         return int(np.sum(ready_vec))
 
-    def get_bck(self, *, overall_timeout: Optional[float] = 30.0, per_recv_timeout: Optional[float] = None,
+    def get_bck(self, *, overall_timeout: Optional[float] = 30.0, per_recv_timeout: Optional[float] = 2.0,
                 max_duplicates: int = 4, max_attempts: Optional[int] = None) -> BackData:
         """
         Collect backscatter lines until all lines are ready (or until timeout / duplicates).
@@ -139,7 +142,7 @@ class UdpInputSource(InputSource):
 
             attempts += 1
             try:
-                backpack = self.recv_back_once()  # timeout=recv_timeout)
+                backpack = self.recv_back_once(timeout=recv_timeout)
                 ready_count = self.proc_back_packet(backpack, ready_vec, max_duplicates)
 
                 if ready_count >= ready_vec.size:
@@ -225,21 +228,30 @@ class BT8InputSource(InputSource):
         self.curr_ind = -1
         self.aap = aap
         self.ardp = ardp
+        self.start_ind = start_ind
+        self.end_ind = end_ind
         self.fnames = sorted(glob(os.path.join(folder_path, "*.bt8")))[start_ind:end_ind]
         self.gyro, self.cog, self.sog, self.dr, self.lat, self.lon = None, None, None, None, None, None
+        log.info(f"BT8: found {len(self.fnames)} files in {folder_path}")
+
+    def _rescan(self):
+        new_files = sorted(glob(os.path.join(self.folder_path, "*.bt8")))[self.start_ind:self.end_ind]
+        if len(new_files) > len(self.fnames):
+            log.info(f"BT8: {len(new_files) - len(self.fnames)} new files found")
+            self.fnames = new_files
 
     def get_bck(self) -> BackData:
-        self.curr_ind += 1
-        if self.curr_ind >= len(self.fnames):
+        next_ind = self.curr_ind + 1
+        if next_ind >= len(self.fnames):
+            self._rescan()
+        if next_ind >= len(self.fnames):
+            # No new files — do not advance curr_ind, return EOF signal
             return BackData(0, 0, np.array([0]))
-        else:
 
-            self.gyro, self.cog, self.sog, self.dr, self.lat, self.lon, bcksctr = read_bt8(self.fnames[self.curr_ind],
-                                                                                           self.aap, self.ardp)
-
-        return BackData(1.875,  # self.dataset["step"][self.curr_ind],
-                        self.pulse,  # self.dataset["pulse"][self.curr_ind]
-                        bcksctr)
+        self.curr_ind = next_ind
+        self.gyro, self.cog, self.sog, self.dr, self.lat, self.lon, bcksctr = read_bt8(
+            self.fnames[self.curr_ind], self.aap, self.ardp)
+        return BackData(1.875, self.pulse, bcksctr)
 
     def get_navi(self) -> Navi:
         return Navi(self.gyro, self.cog, self.sog, self.sog, self.lat, self.lon)

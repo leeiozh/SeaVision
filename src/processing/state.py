@@ -4,31 +4,29 @@ from dataclasses import dataclass, field
 
 @dataclass
 class ProcessorState:
-    index: int = 0  # global index
-    mean_index: int = 0  # index in averaging array
+    index: int = 0
+    mean_index: int = 0
 
-    indices: np.ndarray = field(default_factory=lambda: np.array([]))  # array of rolling indexes
-    cbck: np.ndarray = field(default_factory=lambda: np.array([]))  # current backscatter timeseries
+    indices: np.ndarray = field(default_factory=lambda: np.array([]))
+    # 4-D rolling buffer: (num_area, n_shots, 2*asp, 2*asp)
+    cbck: np.ndarray = field(default_factory=lambda: np.array([]))
 
-    curr_step: float = 1.875  # current range resolution
-    curr_pulse: int = 2  # current pulse
+    curr_step: float = 1.875
+    curr_pulse: int = 2
 
-    speed: np.ndarray = field(default_factory=lambda: np.array([]))  # current speed over ground
-    heading: np.ndarray = field(default_factory=lambda: np.array([]))  # current heading
+    speed: np.ndarray = field(default_factory=lambda: np.array([]))
+    heading: np.ndarray = field(default_factory=lambda: np.array([]))
+    cog: np.ndarray = field(default_factory=lambda: np.array([]))
 
-    dir_vec: np.ndarray = field(default_factory=lambda: np.array([]))  # array of directions for smooth shifting
-    curr_dir: int = 0  # current assumed main direction
-
-    vco: float = 0.0  # current multiplier in doppler term
-    inv: bool = False  # current inversion flag
+    vco: float = 0.0
 
     def init_arrays(self,
                     n_shots: int,
+                    num_area: int,
                     mean: int,
-                    asp: int,
-                    change_dir_num: int):
+                    asp: int):
         self.indices = np.arange(n_shots)
-        self.cbck = np.zeros((n_shots, 2 * asp, 2 * asp))
+        self.cbck = np.zeros((num_area, n_shots, 2 * asp, 2 * asp), dtype=np.float32)
         self.speed = np.zeros(mean)
         self.heading = np.zeros(mean)
-        self.dir_vec = np.zeros(change_dir_num, dtype=int)
+        self.cog = np.zeros(mean)
