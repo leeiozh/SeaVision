@@ -156,6 +156,7 @@ def _decode(data: bytes):
         'vco':      vco,
         'curr_spd': abs(vco),
         'curr_dir': curr_dir,
+        'quality':  un[29],   # repurposed n_dis field: 1 = good, 0 = suspect
         'spec_1d':  spec_1d,
         'spec_2d':  spec_2d,
     }
@@ -205,6 +206,7 @@ def _update(fig, ax1, line1d, fill1d, ax2, pcm, dir_lines, info, d: dict):
         f"  {SEP}\n"
         f"  SOG: {d['sog']:.2f} kn   COG: {d['cog']}°   HDG: {d['hdg']}°\n"
         f"  step: {d['step']:.3f} m   [{_PULSE.get(d['pulse'], '?')}]"
+        f"   quality: {'GOOD' if d['quality'] else 'BAD'}"
     )
     info.set_text(txt)
 

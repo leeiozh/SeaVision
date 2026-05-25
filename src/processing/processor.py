@@ -3,6 +3,9 @@ from scipy.interpolate import interp1d
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 
+import logging as _logging
+_log = _logging.getLogger(__name__)
+
 from src.processing.state import ProcessorState
 from src.processing.averaging import Averager
 from src.algorithms.area import Area
@@ -16,6 +19,12 @@ from src.algorithms.spectrum2d import (
 )
 
 _SIGNAL_BAND = 10  # ±bins around ω=√(gk) for signal extraction (shared by all steps)
+
+# Quality thresholds (hardcoded, not in config)
+_SNR_QUALITY_MIN = 1.5    # min snr_tot
+_WIND_SIG_MIN    = 10.0   # min std of backscatter in ADP±ASP ring
+_T_PEAK_MIN      = 6.0    # min peak period [s]
+
 from src.algorithms.partition import calc_wspd, calc_partitions
 from src.io.structs import Wave, WaveOutput
 
@@ -253,6 +262,7 @@ class Processor:
         if s.index >= cst.N_SHOTS and s.index % int(self.cfg.output["out_times"]) == 0:
 
             sig, wdir = calc_wspd(bck)
+            ring_sig = float(np.std(bck[:, max(0, cst.ADP - cst.ASP): cst.ADP + cst.ASP]))
 
             k_max = np.pi / cst.ASP / s.curr_step * cst.K_NUM
             half = cst.N_SHOTS // 2
@@ -313,9 +323,25 @@ class Processor:
             else:
                 wave_win = Wave(swh=sys["w_s"]["h_s"], snr=0.0,
                                 t_p=sys["w_s"]["t_p"], t_m=sys["w_s"]["t_m"],
-                                d_p=wdir, d_m=wdir)
+                                d_p=sys["w_s"]["d_p"], d_m=sys["w_s"]["d_m"])
             wave_sw1 = _sys_wave(sys["sw_1"])
             wave_sw2 = _sys_wave(sys["sw_2"])
+
+            quality = int(
+                snr_tot >= _SNR_QUALITY_MIN
+                and ring_sig >= _WIND_SIG_MIN
+                and T_peak >= _T_PEAK_MIN
+                and sys["n_sys"] >= 1
+            )
+            if not quality:
+                reasons = []
+                if snr_tot    < _SNR_QUALITY_MIN: reasons.append(f'snr={snr_tot:.2f}<{_SNR_QUALITY_MIN}')
+                if ring_sig   < _WIND_SIG_MIN:    reasons.append(f'ring_sig={ring_sig:.2f}<{_WIND_SIG_MIN}')
+                if T_peak     < _T_PEAK_MIN:      reasons.append(f'T_peak={T_peak:.2f}<{_T_PEAK_MIN}')
+                if sys["n_sys"] < 1:              reasons.append('n_sys=0')
+                msg = f'quality=BAD: {", ".join(reasons)}'
+                _log.info(msg)
+                print(msg)
 
             # True ocean current: add back ship velocity (SOG/COG, m/s)
             # Image is always north-up, so (Ux, Uy) are in geographic (North, East) frame.
@@ -365,6 +391,7 @@ class Processor:
                 result.n_start = round(navi.hdg)
                 result.u_proj = u_proj  # packed into vco slot of UDP packet
                 result.lam_peak = lam_peak  # wavelength from k-spectrum peak [m]
+                result.n_dis = quality    # quality flag transmitted in legacy n_dis slot (un[29])
 
         s.index += 1
         return {

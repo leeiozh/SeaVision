@@ -51,10 +51,13 @@ def calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh):
     """
     # Two systems are considered the same if they are closer than these thresholds
     # in BOTH direction AND period simultaneously.
-    MIN_DIR_SEP = 45.0    # degrees
-    MIN_PER_RATIO = 1.3   # T_large / T_small must exceed this to be distinct
+    MIN_DIR_SEP = 30.0    # degrees
+    MIN_PER_RATIO = 1.15  # T_large / T_small must exceed this to be distinct
 
-    MIN_ENERGY_FRAC = 0.30   # system must hold ≥ 10 % of total spectral energy
+    # Minimum fraction of total energy a peak must carry to be kept as a system.
+    # The blanking window captures only ~50% of a system's energy, so set lower than
+    # the naïve 1/N_sys estimate (was 0.30 — too restrictive for 3-system cases).
+    MIN_ENERGY_FRAC = 0.10
 
     num_area, n_om = s_om_th.shape
     dir_array = np.asarray(dir_array, dtype=float)
@@ -77,9 +80,13 @@ def calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh):
     def _too_similar(d_p_new, t_p_new):
         for s in systems:
             dir_sep = _dir_diff_local(d_p_new, s['d_p'])
+            # Direction alone is sufficient — enforce minimum separation regardless of period
+            if dir_sep < MIN_DIR_SEP:
+                return True
+            # Also merge if periods are too similar even when directions differ
             t_lo = max(min(t_p_new, s['t_p']), 0.1)
             t_hi = max(t_p_new, s['t_p'])
-            if dir_sep < MIN_DIR_SEP and t_hi / t_lo < MIN_PER_RATIO:
+            if t_hi / t_lo < MIN_PER_RATIO:
                 return True
         return False
 
@@ -160,9 +167,9 @@ def calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh):
         s["h_s"] = float(swh * np.sqrt(s["frac"] / total_frac))
 
     # Classify wind sea vs swell using wdir.
-    # Wind sea: direction within 60° of wdir, prefer shortest T among candidates.
+    # Wind sea: direction within 45° of wdir, prefer shortest T among candidates.
     # No fallback — if no system matches wdir, all systems are swell (w_s = None).
-    WIND_DIR_THRESH = 60.0
+    WIND_DIR_THRESH = 45.0
 
     def _dir_diff(a, b):
         d = abs(a - b) % 360
