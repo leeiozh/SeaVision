@@ -78,11 +78,11 @@ def _sys_fields(prefix, d):
     }
 
 
-def _dispersion_centroids(spec_3d, k_max, om_max):
+def _dispersion_centroids(spec_3d, k_max, om_max, sog=0.0, cog_deg=0.0):
     """
-    For each valid (kx, ky) cell, compute the energy-weighted ω centroid using
-    a wide window (n_om//4) centred on the undisturbed dispersion curve — identical
-    to Pass-1 of calc_current_vector. Returns (k_abs, om_centroid) scatter arrays.
+    For each valid (kx, ky) cell, find the argmax of energy within a wide window
+    centred on the ship-velocity-shifted dispersion curve (mirrors Pass-1 of
+    calc_current_vector). Returns (k_abs, om_peak) scatter arrays for debug overlay.
     """
     n_om, n2, _ = spec_3d.shape
     k_num = n2 // 2
@@ -97,21 +97,26 @@ def _dispersion_centroids(spec_3d, k_max, om_max):
     k_hi = k_max * 0.65
     i_vals, j_vals = np.where((K_abs > k_lo) & (K_abs < k_hi))
 
-    win = n_om // 4
+    cog_rad = np.deg2rad(cog_deg)
+    Ux_prior = -sog * np.sin(cog_rad)
+    Uy_prior = -sog * np.cos(cog_rad)
+
+    win = max(10, n_om // 4)
     k_list, om_list = [], []
     for i, j in zip(i_vals, j_vals):
-        ci = int(round(float(omega_ref[i, j]) / om_max * (n_om - 1)))
+        om_ctr = float(omega_ref[i, j] + KX[i, j] * Ux_prior + KY[i, j] * Uy_prior)
+        ci = int(round(om_ctr / om_max * (n_om - 1)))
         ci = max(0, min(n_om - 1, ci))
         lo = max(1, ci - win)
         hi = min(n_om, ci + win + 1)
         if hi <= lo:
             continue
         sl = spec_3d[lo:hi, i, j].astype(np.float64)
-        w  = sl.sum()
-        if w <= 0:
+        pk = int(np.argmax(sl))
+        if sl[pk] <= 0:
             continue
         k_list.append(float(K_abs[i, j]))
-        om_list.append(float(np.dot(sl, om_arr[lo:hi])) / w)
+        om_list.append(float(om_arr[lo + pk]))
 
     return np.array(k_list), np.array(om_list)
 
@@ -600,21 +605,13 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
 
 # ── processing ────────────────────────────────────────────────────────────────
 
-def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
+def _load_frames(name, nc_path, cfg, log):
     """
-    Read first N_SHOTS frames, run full algorithm pipeline, return params dict.
-    Returns (row_dict, spec_1d, spec_2d) or None on failure.
-    wind_meta: optional dict with 'u_10', 'v_10' keys (ERA5 wind components [m/s]).
+    I/O phase: read N_SHOTS frames from NC file + buoy data if applicable.
+    Returns dict with raw arrays or None on failure.
+    Designed to run in a background thread while the previous file is computed.
     """
-    cst    = cfg.const
-    om_max = np.pi / (60.0 / cst.RPM)
-    step   = 1.875
-    k_max  = np.pi / cst.ASP / step * cst.K_NUM
-    half   = cst.N_SHOTS // 2
-    omega_vals = np.linspace(0, om_max, half)
-    k_vals     = np.linspace(0, k_max, cst.K_NUM)
-    dir_array  = np.linspace(0, 360, cst.N_DIRS, endpoint=False)
-
+    cst = cfg.const
     seg_azimuths = np.linspace(0, 360, cst.NUM_AREA, endpoint=False)
     msh = [Area(cst.ASP * 2, cst.ADP, np.deg2rad(az), 0, cst.AAP).calc_mask()
            for az in seg_azimuths]
@@ -625,14 +622,14 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
         log.error(f'{name}: cannot open {nc_path!r}: {exc}')
         return None
 
-    cbck    = np.zeros((cst.NUM_AREA, cst.N_SHOTS, 2 * cst.ASP, 2 * cst.ASP), dtype=np.float32)
-    pulse   = 1
-    last_bck  = None
+    cbck = np.zeros((cst.NUM_AREA, cst.N_SHOTS, 2 * cst.ASP, 2 * cst.ASP), dtype=np.float32)
+    pulse = 1
+    last_bck = None
     last_navi = None
     sog_acc = 0.0
     cog_sin_acc = cog_cos_acc = 0.0
     hdg_sin_acc = hdg_cos_acc = 0.0
-    n_navi  = 0
+    n_navi = 0
 
     try:
         for t in range(cst.N_SHOTS):
@@ -640,9 +637,9 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
             if back.step == 0.0:
                 log.warning(f'{name}: only {t} frames (need {cst.N_SHOTS}), skipping')
                 return None
-            navi      = source.get_navi()
-            pulse     = back.pulse
-            last_bck  = back.bck
+            navi = source.get_navi()
+            pulse = back.pulse
+            last_bck = back.bck
             last_navi = navi
             sog_acc += float(navi.sog)
             _cr = np.deg2rad(float(navi.cog)); cog_sin_acc += np.sin(_cr); cog_cos_acc += np.cos(_cr)
@@ -662,10 +659,51 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
         except Exception:
             pass
 
-    n_navi    = max(n_navi, 1)
-    sog_mean  = sog_acc / n_navi
-    cog_mean  = float(np.degrees(np.arctan2(cog_sin_acc, cog_cos_acc)) % 360)
-    hdg_mean  = float(np.degrees(np.arctan2(hdg_sin_acc, hdg_cos_acc)) % 360)
+    n_navi = max(n_navi, 1)
+    om_max = np.pi / (60.0 / cst.RPM)
+
+    buoy_proc = None
+    if '0606' in name:
+        raw_buoy = _load_buoy_data(nc_path)
+        if raw_buoy is not None:
+            buoy_proc = _compute_buoy_spectra(raw_buoy, cst.N_FREQ, om_max)
+
+    return {
+        'cbck':      cbck,
+        'pulse':     pulse,
+        'last_bck':  last_bck,
+        'last_navi': last_navi,
+        'nc_path':   nc_path,
+        'sog_mean':  sog_acc / n_navi,
+        'cog_mean':  float(np.degrees(np.arctan2(cog_sin_acc, cog_cos_acc)) % 360),
+        'hdg_mean':  float(np.degrees(np.arctan2(hdg_sin_acc, hdg_cos_acc)) % 360),
+        'buoy_proc': buoy_proc,
+    }
+
+
+def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=None):
+    """
+    Compute phase: run full algorithm on pre-loaded frames dict.
+    Returns (row_dict, spec_1d, spec_2d) or None on failure.
+    """
+    cst       = cfg.const
+    om_max    = np.pi / (60.0 / cst.RPM)
+    step      = 1.875
+    k_max     = np.pi / cst.ASP / step * cst.K_NUM
+    half      = cst.N_SHOTS // 2
+    omega_vals = np.linspace(0, om_max, half)
+    k_vals     = np.linspace(0, k_max, cst.K_NUM)
+    dir_array  = np.linspace(0, 360, cst.N_DIRS, endpoint=False)
+
+    cbck      = frames['cbck']
+    pulse     = frames['pulse']
+    last_bck  = frames['last_bck']
+    last_navi = frames['last_navi']
+    nc_path   = frames['nc_path']
+    sog_mean  = frames['sog_mean']
+    cog_mean  = frames['cog_mean']
+    hdg_mean  = frames['hdg_mean']
+    buoy_proc = frames['buoy_proc']
 
     try:
         _, wdir = calc_wspd(last_bck)
@@ -697,9 +735,8 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
         sys = calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh)
 
         cog_rad  = np.deg2rad(cog_mean)
-        # True current: Ux/Uy = apparent (water − ship). Add ship, then negate.
-        u_curr_x = -(float(Ux) + sog_mean * np.sin(cog_rad))  # East [m/s]
-        u_curr_y = -(float(Uy) + sog_mean * np.cos(cog_rad))  # North [m/s]
+        u_curr_x = float(Ux) + sog_mean * np.sin(cog_rad)   # East [m/s]
+        u_curr_y = float(Uy) + sog_mean * np.cos(cog_rad)   # North [m/s]
         curr_speed = float(np.hypot(u_curr_x, u_curr_y))
         curr_dir   = float(np.degrees(np.arctan2(u_curr_x, u_curr_y)) % 360)  # compass
 
@@ -710,8 +747,9 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
         # Ship-only projection: what u_proj would be if water current = 0
         u_ship_proj = -sog_mean * float(np.cos(peak_dir_rad - cog_rad))
 
-        # Per-cell ω centroids for scatter overlay on dispersion portrait
-        cent_k, cent_om = _dispersion_centroids(spec_3d_corr, k_max, om_max)
+        # Per-cell ω peak positions for scatter overlay on dispersion portrait
+        cent_k, cent_om = _dispersion_centroids(spec_3d_corr, k_max, om_max,
+                                                sog=sog_mean, cog_deg=cog_mean)
 
         wspd = 0.01 * float(cst.WSPD_A + cst.WSPD_B * wind_sig)
 
@@ -754,13 +792,6 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
     except Exception as exc:
         log.error(f'{name}: algorithm error: {exc}', exc_info=True)
         return None
-
-    # Buoy processing (only for "0606" files, batch only)
-    buoy_proc = None
-    if '0606' in name:
-        raw_buoy = _load_buoy_data(nc_path)
-        if raw_buoy is not None:
-            buoy_proc = _compute_buoy_spectra(raw_buoy, cst.N_FREQ, om_max)
 
     if pics_dir is not None:
         try:
@@ -808,6 +839,14 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
         'hdg_proc': hdg_mean,
     }
     return row, spec_1d, spec_2d
+
+
+def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
+    """Thin wrapper: load frames then compute. Used by single-process batch and legacy callers."""
+    frames = _load_frames(name, nc_path, cfg, log)
+    if frames is None:
+        return None
+    return _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta)
 
 
 def main():

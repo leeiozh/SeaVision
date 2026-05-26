@@ -18,6 +18,8 @@ Merge partial CSVs after array job completes:
 import argparse
 import gc
 import os
+import queue
+import threading
 
 import numpy as np
 import pandas as pd
@@ -25,17 +27,50 @@ from multiprocessing import Pool
 
 from src.config import load_config
 from src.runtime.logger import setup_logger
-from batch_process import _process_file, _PARAMS_FIELDS
+from batch_process import _load_frames, _compute_from_frames, _PARAMS_FIELDS
 
 
-# ── worker (top-level for pickle) ────────────────────────────────────────────
+# ── chunk worker: reads next file while computing current (read-ahead) ────────
 
-def _worker(packed):
-    name, nc_path, cfg, spec_dir, pics_dir, wind_meta = packed
+def _chunk_worker(args):
+    """
+    Process a contiguous chunk of files with I/O–compute overlap.
+    A background thread reads file N+1 into a bounded queue while the main
+    thread computes file N.  Queue(maxsize=1) limits peak memory to 2 cbck
+    arrays per worker (~2.4 GB each at default config).
+    """
+    task_list, cfg, spec_dir, pics_dir = args
     log = setup_logger(f'bp.{os.getpid()}')
-    result = _process_file(name, nc_path, cfg, spec_dir, pics_dir, log,
-                           wind_meta=wind_meta)
-    return name, result
+    results = []
+    if not task_list:
+        return results
+
+    _SENTINEL = object()
+    q = queue.Queue(maxsize=1)
+
+    def _reader():
+        for name, nc_path, wind_meta in task_list:
+            data = _load_frames(name, nc_path, cfg, log)
+            q.put((name, wind_meta, data))
+        q.put(_SENTINEL)
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+
+    while True:
+        item = q.get()
+        if item is _SENTINEL:
+            break
+        name, wind_meta, frames = item
+        if frames is not None:
+            res = _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta)
+        else:
+            res = None
+        results.append((name, res))
+        gc.collect()
+
+    t.join()
+    return results
 
 
 # ── core loop ─────────────────────────────────────────────────────────────────
@@ -56,9 +91,6 @@ def _run(file_pairs, cfg, spec_dir, pics_dir, log, n_workers, out_csv):
         log.info('All files already processed')
         return
 
-    tasks = [(name, path, cfg, spec_dir, pics_dir, wind_meta)
-             for name, path, wind_meta in pending]
-
     # CSV is written from the main process after each result — no lock needed
     write_header = not os.path.exists(out_csv)
     n_done = 0
@@ -77,15 +109,22 @@ def _run(file_pairs, cfg, spec_dir, pics_dir, log, n_workers, out_csv):
                  f'quality={row["quality"]}  swh={row["swh"]:.2f}m')
 
     if n_workers > 1:
-        with Pool(n_workers) as pool:
-            for name, res in pool.imap_unordered(_worker, tasks):
-                _handle(name, res)
-                gc.collect()
+        # Split into n_workers contiguous chunks; each worker gets its own slice
+        # so the background read-ahead thread prefetches sequentially on disk.
+        chunk_size = (len(pending) + n_workers - 1) // n_workers
+        chunks = [pending[i * chunk_size:(i + 1) * chunk_size]
+                  for i in range(n_workers)]
+        chunks = [c for c in chunks if c]
+
+        worker_args = [(chunk, cfg, spec_dir, pics_dir) for chunk in chunks]
+        with Pool(len(chunks)) as pool:
+            for chunk_results in pool.imap_unordered(_chunk_worker, worker_args):
+                for name, res in chunk_results:
+                    _handle(name, res)
     else:
-        for t in tasks:
-            name, res = _worker(t)
+        # Single process: still use read-ahead via _chunk_worker
+        for name, res in _chunk_worker((pending, cfg, spec_dir, pics_dir)):
             _handle(name, res)
-            gc.collect()
 
     log.info(f'Done: {n_done} new rows → {out_csv}')
 
