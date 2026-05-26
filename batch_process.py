@@ -290,7 +290,7 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
 
     has_ewdm = (buoy_proc is not None and buoy_proc.get('ewdm') is not None)
     ncols = 3
-    figw  = 16 if has_ewdm else 16
+    figw  = 16 if has_ewdm else 12
 
     pulse_str = {1: 'SP', 2: 'MP', 3: 'LP'}.get(int(pulse), str(pulse))
 
@@ -508,7 +508,7 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
 
         # Centroid scatter — where energy actually sits (Pass-1 wide window)
         if cent_k is not None and len(cent_k) > 0:
-            ax_disp.scatter(cent_k, cent_om, s=3, c='yellow', alpha=0.35,
+            ax_disp.scatter(cent_k, cent_om, s=3, c='red', alpha=0.35,
                             linewidths=0, zorder=3, label='centroids')
 
         ax_disp.plot(_k_arr, _om_undist, 'w--', lw=1.0, label='ω=√(gk)')
@@ -521,7 +521,7 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
         # Yellow: ship-only curve (if water current = 0)
         _om_ship = _om_undist + _k_arr * u_ship_proj
         _mask_ship = (_om_ship >= 0) & (_om_ship <= _om_max)
-        ax_disp.plot(_k_arr[_mask_ship], _om_ship[_mask_ship], color='yellow',
+        ax_disp.plot(_k_arr[_mask_ship], _om_ship[_mask_ship], color='red',
                      lw=1.0, ls='--', label=f'ship_only={u_ship_proj:+.2f}')
 
         ax_disp.set_xlim(0, _k_max)

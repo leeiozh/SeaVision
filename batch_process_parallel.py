@@ -142,8 +142,6 @@ def main():
         os.makedirs(d, exist_ok=True)
 
     df_all = pd.read_csv(args.csv)
-    df_all = df_all[df_all["cruise"] == "ai63"]
-    df_all = df_all[df_all["num"] > 430]
 
     slurm_mode = args.task_id is not None and args.n_tasks is not None
     if slurm_mode:

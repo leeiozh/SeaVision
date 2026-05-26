@@ -1,0 +1,4 @@
+__pycache__/
+batch_out*/
+*.npy
+*.png
