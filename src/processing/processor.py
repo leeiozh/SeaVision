@@ -285,7 +285,7 @@ class Processor:
 
             spec_3d_corr /= cst.NUM_AREA
 
-            Ux, Uy = calc_current_vector(spec_3d_corr, k_max, self.om_max)
+            Ux, Uy = calc_current_vector(spec_3d_corr, k_max, self.om_max, band=_SIGNAL_BAND)
             spec_3d_fixed = apply_doppler_3d_vec(spec_3d_corr, k_max, Ux, Uy, self.om_max)
 
             port_fixed, _ = calc_port(spec_3d_fixed)
@@ -340,8 +340,8 @@ class Processor:
             # True ocean current: Ux/Uy = apparent (water − ship). Add ship, then negate.
             cog_rad  = np.deg2rad(float(np.mean(s.cog)))
             sog_mean = float(np.mean(s.speed))
-            u_curr_x = -(float(Ux) + sog_mean * np.sin(cog_rad))  # East [m/s]
-            u_curr_y = -(float(Uy) + sog_mean * np.cos(cog_rad))  # North [m/s]
+            u_curr_x = (float(Ux) + sog_mean * np.sin(cog_rad))  # East [m/s]
+            u_curr_y = (float(Uy) + sog_mean * np.cos(cog_rad))  # North [m/s]
             curr_speed = float(np.hypot(u_curr_x, u_curr_y))
             # Compass bearing: arctan2(East, North) = bearing from North, clockwise
             curr_dir = float(np.degrees(np.arctan2(u_curr_x, u_curr_y)) % 360)

@@ -60,13 +60,16 @@ def calc_vco(port, om_max, k_max):
 
 def calc_current_vector(spec_3d, k_max, om_max, band):
     """
-    Estimate current velocity vector (Ux, Uy) [m/s] from the averaged 3D spectrum
-    via weighted least-squares fit of the dispersion centroid displacement:
+    Two-pass estimation of (Ux, Uy) [m/s] from the 3-D spectrum via
+    dispersion-centroid least-squares:  ω̄(kx,ky) − √(g|k|) = kx·Ux + ky·Uy
 
-        ω̄(kx, ky) − √(g·|k|) = kx·Ux + ky·Uy
+    Pass 1 — wide window (n_om//4) centred on undisturbed curve.
+              Catches the energy peak even when the Doppler shift is large
+              (e.g. high ship speed). Fixes bias toward (0, 0) at high SOG.
+    Pass 2 — narrow window (band bins) centred on the Pass-1 shifted curve.
+              Suppresses off-curve noise; refines the estimate.
 
-    Each valid (kx, ky) cell contributes one equation weighted by its integrated
-    spectral power. Returns (Ux, Uy) in radar image coordinates [m/s].
+    Returns (Ux, Uy) [m/s] in geographic (East, North) frame.
     """
     n_om, n2, _ = spec_3d.shape
     k_num = n2 // 2
@@ -78,39 +81,49 @@ def calc_current_vector(spec_3d, k_max, om_max, band):
 
     om_arr = np.linspace(0, om_max, n_om)
     omega_ref = np.sqrt(9.81 * K_abs)
-    ref_idx = np.clip(np.rint(omega_ref / om_max * (n_om - 1)).astype(int), 0, n_om - 1)
-    om_lo = np.maximum(1, ref_idx - band)
-    om_hi = np.minimum(n_om, ref_idx + band + 1)
 
     k_lo = k_max * 0.08
     k_hi = k_max * 0.65
     i_vals, j_vals = np.where((K_abs > k_lo) & (K_abs < k_hi))
 
-    eq_A = []
-    eq_b = []
-    eq_w = []
+    def _lstsq_pass(Ux_prior, Uy_prior, win):
+        eq_A, eq_b, eq_w = [], [], []
+        for i, j in zip(i_vals, j_vals):
+            # Centre the search window on the SHIFTED dispersion curve
+            om_ctr = float(omega_ref[i, j]
+                           + KX[i, j] * Ux_prior + KY[i, j] * Uy_prior)
+            ci = int(round(om_ctr / om_max * (n_om - 1)))
+            ci = max(0, min(n_om - 1, ci))
+            lo = max(1, ci - win)
+            hi = min(n_om, ci + win + 1)
+            if hi <= lo:
+                continue
+            sl = spec_3d[lo:hi, i, j].astype(np.float64)
+            w = sl.sum()
+            if w <= 0:
+                continue
+            om_c = float(np.dot(sl, om_arr[lo:hi])) / w
+            eq_A.append([float(KX[i, j]), float(KY[i, j])])
+            eq_b.append(om_c - float(omega_ref[i, j]))
+            eq_w.append(w)
 
-    for i, j in zip(i_vals, j_vals):
-        lo, hi = int(om_lo[i, j]), int(om_hi[i, j])
-        if hi <= lo:
-            continue
-        sl = spec_3d[lo:hi, i, j].astype(np.float64)
-        w = sl.sum()
-        if w <= 0:
-            continue
-        om_centroid = float(np.dot(sl, om_arr[lo:hi])) / w
-        eq_A.append([float(KX[i, j]), float(KY[i, j])])
-        eq_b.append(om_centroid - float(omega_ref[i, j]))
-        eq_w.append(w)
+        if len(eq_A) < 10:
+            return 0.0, 0.0
 
-    if len(eq_A) < 10:
-        return 0.0, 0.0
+        A = np.array(eq_A)
+        b = np.array(eq_b)
+        wsq = np.sqrt(np.array(eq_w))
+        res, _, _, _ = np.linalg.lstsq(A * wsq[:, None], b * wsq, rcond=None)
+        return float(res[0]), float(res[1])
 
-    A = np.array(eq_A)
-    b = np.array(eq_b)
-    w = np.sqrt(np.array(eq_w))
-    result, _, _, _ = np.linalg.lstsq(A * w[:, None], b * w, rcond=None)
-    return float(result[0]), float(result[1])
+    # Pass 1: wide window — always finds the peak regardless of Doppler offset
+    wide = max(band, n_om // 4)
+    Ux, Uy = _lstsq_pass(0.0, 0.0, wide)
+
+    # Pass 2: narrow window centred on Pass-1 shifted curve
+    Ux, Uy = _lstsq_pass(Ux, Uy, band)
+
+    return Ux, Uy
 
 
 def dispersion_curve(k, vco, depth=None):

@@ -78,6 +78,44 @@ def _sys_fields(prefix, d):
     }
 
 
+def _dispersion_centroids(spec_3d, k_max, om_max):
+    """
+    For each valid (kx, ky) cell, compute the energy-weighted ω centroid using
+    a wide window (n_om//4) centred on the undisturbed dispersion curve — identical
+    to Pass-1 of calc_current_vector. Returns (k_abs, om_centroid) scatter arrays.
+    """
+    n_om, n2, _ = spec_3d.shape
+    k_num = n2 // 2
+    kx_arr = np.arange(-k_num, k_num, dtype=float) / k_num * k_max
+    ky_arr = np.arange(-k_num, k_num, dtype=float) / k_num * k_max
+    KX, KY = np.meshgrid(kx_arr, ky_arr, indexing='ij')
+    K_abs  = np.sqrt(KX ** 2 + KY ** 2)
+    om_arr = np.linspace(0, om_max, n_om)
+    omega_ref = np.sqrt(9.81 * K_abs)
+
+    k_lo = k_max * 0.08
+    k_hi = k_max * 0.65
+    i_vals, j_vals = np.where((K_abs > k_lo) & (K_abs < k_hi))
+
+    win = n_om // 4
+    k_list, om_list = [], []
+    for i, j in zip(i_vals, j_vals):
+        ci = int(round(float(omega_ref[i, j]) / om_max * (n_om - 1)))
+        ci = max(0, min(n_om - 1, ci))
+        lo = max(1, ci - win)
+        hi = min(n_om, ci + win + 1)
+        if hi <= lo:
+            continue
+        sl = spec_3d[lo:hi, i, j].astype(np.float64)
+        w  = sl.sum()
+        if w <= 0:
+            continue
+        k_list.append(float(K_abs[i, j]))
+        om_list.append(float(np.dot(sl, om_arr[lo:hi])) / w)
+
+    return np.array(k_list), np.array(om_list)
+
+
 # ── buoy data (batch only, not production) ────────────────────────────────────
 
 def _load_buoy_data(nc_path):
@@ -227,7 +265,9 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
               Ux, Uy, u_proj, u_curr_x, u_curr_y, curr_speed, curr_dir_in, quality,
               pulse, last_navi, adp, asp, n_dirs, pics_dir,
               port_corr=None, k_vals=None, omega_vals=None,
-              wdir_meta=None, buoy_proc=None):
+              wdir_meta=None, buoy_proc=None,
+              cent_k=None, cent_om=None, u_ship_proj=0.0,
+              sog_mean=0.0, cog_mean=0.0):
     """
     Diagnostic figure.
 
@@ -254,11 +294,11 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
 
     pulse_str = {1: 'SP', 2: 'MP', 3: 'LP'}.get(int(pulse), str(pulse))
 
-    fig = Figure(figsize=(figw, 8))
+    fig = Figure(figsize=(figw, 12))
     FigureCanvasAgg(fig)
     fig.suptitle(f'{name}   [{pulse_str}]', fontsize=11, y=0.998)
 
-    gs = GridSpec(3, ncols, figure=fig, height_ratios=[3, 1, 2],
+    gs = GridSpec(3, ncols, figure=fig, height_ratios=[3, 3, 2],
                   hspace=0.45, wspace=0.30,
                   left=0.06, right=0.97, top=0.96, bottom=0.03)
 
@@ -352,8 +392,8 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
     curr_speed   = float(np.hypot(u_curr_x, u_curr_y))
     curr_dir_deg = float(curr_dir_in)
     extra = [
-        (np.deg2rad(last_navi.cog), _F_DISPLAY * 0.4,
-         'deepskyblue', f'Ship {last_navi.sog:.1f}m/s'),
+        (np.deg2rad(cog_mean), _F_DISPLAY * 0.4,
+         'deepskyblue', f'Ship {sog_mean:.1f}m/s'),
     ]
     if curr_speed > 0:
         extra.append((np.deg2rad(curr_dir_deg), _F_DISPLAY * 0.3,
@@ -465,17 +505,32 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
         ax_disp.imshow(port_corr, aspect='auto', origin='lower', cmap='gnuplot2',
                        extent=[0, _k_max, 0, _om_max],
                        vmin=0, vmax=max(float(port_corr.max()), 1e-9))
+
+        # Centroid scatter — where energy actually sits (Pass-1 wide window)
+        if cent_k is not None and len(cent_k) > 0:
+            ax_disp.scatter(cent_k, cent_om, s=3, c='red', alpha=0.35,
+                            linewidths=0, zorder=3, label='centroids')
+
         ax_disp.plot(_k_arr, _om_undist, 'w--', lw=1.0, label='ω=√(gk)')
+
+        # Cyan: full apparent velocity (algorithm result)
         _mask = (_om_shift >= 0) & (_om_shift <= _om_max)
         ax_disp.plot(_k_arr[_mask], _om_shift[_mask], color='cyan', lw=1.3,
                      label=f'u_proj={u_proj:+.2f}')
+
+        # Yellow: ship-only curve (if water current = 0)
+        _om_ship = _om_undist + _k_arr * u_ship_proj
+        _mask_ship = (_om_ship >= 0) & (_om_ship <= _om_max)
+        ax_disp.plot(_k_arr[_mask_ship], _om_ship[_mask_ship], color='red',
+                     lw=1.0, ls='--', label=f'ship_only={u_ship_proj:+.2f}')
+
         ax_disp.set_xlim(0, _k_max)
         ax_disp.set_ylim(0, _om_max)
         ax_disp.legend(fontsize=6, loc='upper right')
         _info = (f'Ux={Ux:+.2f} Uy={Uy:+.2f} m/s\n'
-                 f'u_proj={u_proj:+.2f} m/s\n'
+                 f'u_proj={u_proj:+.2f}  ship={u_ship_proj:+.2f} m/s\n'
                  f'curr={curr_speed:.2f}→{curr_dir_deg:.0f}°\n'
-                 f'SOG={last_navi.sog:.2f} COG={last_navi.cog:.0f}°')
+                 f'SOG={sog_mean:.2f} COG={cog_mean:.0f}°')
         ax_disp.text(0.02, 0.97, _info, transform=ax_disp.transAxes,
                      fontsize=6, va='top', color='white',
                      bbox=dict(facecolor='black', alpha=0.55, pad=2))
@@ -522,8 +577,8 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
          'Sw2 Tp [s]',   f"{sw2['t_p']:.2f}" if sw2 else '—',
          'Sw2 Dp [°]',   f"{sw2['d_p']:.1f}" if sw2 else '—',
          'Sw2 Tm [s]',   f"{sw2['t_m']:.2f}" if sw2 else '—',
-         'SOG [m/s]',    f'{last_navi.sog:.2f}',
-         'COG [°]',      f'{last_navi.cog:.1f}'],
+         'SOG [m/s]',    f'{sog_mean:.2f}',
+         'COG [°]',      f'{cog_mean:.1f}'],
     ]
 
     col_labels = ['Par', 'Val'] * 6
@@ -574,6 +629,10 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
     pulse   = 1
     last_bck  = None
     last_navi = None
+    sog_acc = 0.0
+    cog_sin_acc = cog_cos_acc = 0.0
+    hdg_sin_acc = hdg_cos_acc = 0.0
+    n_navi  = 0
 
     try:
         for t in range(cst.N_SHOTS):
@@ -585,6 +644,10 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
             pulse     = back.pulse
             last_bck  = back.bck
             last_navi = navi
+            sog_acc += float(navi.sog)
+            _cr = np.deg2rad(float(navi.cog)); cog_sin_acc += np.sin(_cr); cog_cos_acc += np.cos(_cr)
+            _hr = np.deg2rad(float(navi.hdg)); hdg_sin_acc += np.sin(_hr); hdg_cos_acc += np.cos(_hr)
+            n_navi += 1
             for i in range(cst.NUM_AREA):
                 (x, y), (wx, wy) = msh[i]
                 row0 = last_bck[y, x] * (1.0 - wx) + last_bck[y, x + 1] * wx
@@ -598,6 +661,11 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
             source.close()
         except Exception:
             pass
+
+    n_navi    = max(n_navi, 1)
+    sog_mean  = sog_acc / n_navi
+    cog_mean  = float(np.degrees(np.arctan2(cog_sin_acc, cog_cos_acc)) % 360)
+    hdg_mean  = float(np.degrees(np.arctan2(hdg_sin_acc, hdg_cos_acc)) % 360)
 
     try:
         _, wdir = calc_wspd(last_bck)
@@ -627,16 +695,22 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
         swh = 0.01 * (cst.SNR_A + cst.SNR_B * np.sqrt(snr_tot))
         sys = calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh)
 
-        cog_rad  = np.deg2rad(float(last_navi.cog))
+        cog_rad  = np.deg2rad(cog_mean)
         # True current: Ux/Uy = apparent (water − ship). Add ship, then negate.
-        u_curr_x = -(float(Ux) + float(last_navi.sog) * np.sin(cog_rad))  # East [m/s]
-        u_curr_y = -(float(Uy) + float(last_navi.sog) * np.cos(cog_rad))  # North [m/s]
+        u_curr_x = -(float(Ux) + sog_mean * np.sin(cog_rad))  # East [m/s]
+        u_curr_y = -(float(Uy) + sog_mean * np.cos(cog_rad))  # North [m/s]
         curr_speed = float(np.hypot(u_curr_x, u_curr_y))
         curr_dir   = float(np.degrees(np.arctan2(u_curr_x, u_curr_y)) % 360)  # compass
 
         # Apparent current projected onto dominant wave direction (for dispersion portrait)
         peak_dir_rad = np.deg2rad(peak_dir)
         u_proj = float(Ux * np.sin(peak_dir_rad) + Uy * np.cos(peak_dir_rad))
+
+        # Ship-only projection: what u_proj would be if water current = 0
+        u_ship_proj = -sog_mean * float(np.cos(peak_dir_rad - cog_rad))
+
+        # Per-cell ω centroids for scatter overlay on dispersion portrait
+        cent_k, cent_om = _dispersion_centroids(spec_3d_corr, k_max, om_max)
 
         wspd = 0.01 * float(cst.WSPD_A + cst.WSPD_B * wind_sig)
 
@@ -696,6 +770,8 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
                 pulse, last_navi, cst.ADP, cst.ASP, cst.N_DIRS, pics_dir,
                 port_corr=port_corr, k_vals=k_vals, omega_vals=omega_vals,
                 wdir_meta=wdir_meta, buoy_proc=buoy_proc,
+                cent_k=cent_k, cent_om=cent_om, u_ship_proj=u_ship_proj,
+                sog_mean=sog_mean, cog_mean=cog_mean,
             )
         except Exception as exc:
             log.warning(f'{name}: pic save failed: {exc}', exc_info=True)
@@ -726,9 +802,9 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
         'u_y':        float(Uy),
         'wind_sig': float(wind_sig),
         'wind_dir': float(wdir),
-        'sog_proc': float(last_navi.sog),
-        'cog_proc': float(last_navi.cog),
-        'hdg_proc': float(last_navi.hdg),
+        'sog_proc': sog_mean,
+        'cog_proc': cog_mean,
+        'hdg_proc': hdg_mean,
     }
     return row, spec_1d, spec_2d
 
