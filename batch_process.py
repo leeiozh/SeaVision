@@ -41,8 +41,8 @@ _SIGNAL_BAND = 10    # must match processor.py
 
 # Quality thresholds — hardcoded, same as processor.py
 _SNR_QUALITY_MIN = 1.5
-_WIND_SIG_MIN    = 10.0
-_T_PEAK_MIN      = 6.0
+_WIND_SIG_MIN    = 5.0
+_T_PEAK_MIN      = 5.5
 
 _F_DISPLAY   = 0.20   # Hz — radial limit on polar spectrum display
 _BUOY_SKIP_SEC = 420  # skip first 7 min of buoy data (deployment)
@@ -54,7 +54,7 @@ _PARAMS_FIELDS = [
     "wswh", "wt_p", "wt_m", "wd_p",
     "sw1_swh", "sw1_t_p", "sw1_d_p",
     "sw2_swh", "sw2_t_p", "sw2_d_p",
-    "ide_sys", "u_proj",
+    "ide_sys", "curr_speed", "curr_dir", "curr_x", "curr_y", "wspd_proc",
     "u_x", "u_y",
     "wind_sig", "wind_dir",
     "sog_proc", "cog_proc", "hdg_proc",
@@ -115,9 +115,6 @@ def _load_buoy_data(nc_path):
         print(f'[buoy] Only {n_kept} samples after {_BUOY_SKIP_SEC}s skip — skipping')
         return None
 
-    dt = float(np.median(np.diff(time_b[mask])))
-    print(f'[buoy] Loaded {n_kept} samples  dt={dt:.3f}s  fs={1/dt:.2f}Hz  '
-          f'z: mean={x_b[mask].mean():.3f} std={z_b[mask].std():.3f}m')
     return {'time': time_b[mask], 'x': x_b[mask], 'y': y_b[mask], 'z': z_b[mask]}
 
 
@@ -138,9 +135,7 @@ def _compute_buoy_spectra(buoy_raw, n_freq, om_max):
     nperseg = min(512, len(z) // 4)
     try:
         f_w, Szz = scipy_welch(z - z.mean(), fs=fs, nperseg=nperseg, scaling='density')
-        print(f'[buoy] Welch: {len(f_w)} bins, '
-              f'f=[{f_w[1]:.3f}..{f_w[-1]:.3f}]Hz, '
-              f'peak_f={f_w[np.argmax(Szz)]:.3f}Hz')
+
     except Exception as exc:
         print(f'[buoy] Welch failed: {exc}')
         traceback.print_exc()
@@ -187,28 +182,52 @@ def _compute_buoy_spectra(buoy_raw, n_freq, om_max):
         )
         freq_e = ewdm_out.frequency.values
         dirs_e = ewdm_out.direction.values
-        print(f'[buoy] EWDM ok: f=[{freq_e[0]:.3f}..{freq_e[-1]:.3f}]Hz  '
-              f'dir=[{dirs_e[0]:.0f}..{dirs_e[-1]:.0f}]°')
     except ImportError:
         print('[buoy] ewdm not installed — directional spectrum skipped')
     except Exception as exc:
         print(f'[buoy] EWDM failed: {exc}')
         traceback.print_exc()
 
+    # Buoy Welch peak and mean frequency
+    f_peak_hz = float(f_w[np.argmax(Szz)]) if len(Szz) > 0 else None
+    denom = float(np.sum(Szz))
+    f_mean_hz = float(np.dot(f_w, Szz) / denom) if denom > 0 else None
+
+    # EWDM directional peak and mean
+    dp_buoy = dm_buoy = None
+    if ewdm_out is not None:
+        try:
+            S_all = np.asarray(ewdm_out.directional_spectrum.values, dtype=float)
+            if S_all.ndim == 3:
+                S_all = S_all.mean(axis=0)          # (n_freq, n_dir)
+            dirs_all = np.asarray(ewdm_out.direction.values, dtype=float) % 360
+            s_dir_b  = S_all.sum(axis=0)
+            dp_buoy  = float(dirs_all[np.argmax(s_dir_b)])
+            cx = float(np.dot(s_dir_b, np.cos(np.deg2rad(dirs_all))))
+            cy = float(np.dot(s_dir_b, np.sin(np.deg2rad(dirs_all))))
+            dm_buoy  = float(np.degrees(np.arctan2(cy, cx)) % 360)
+        except Exception:
+            pass
+
     return {
         'freq_hz':    out_om / (2 * np.pi),
         's_freq_255': s_freq_255,
         'ewdm':       ewdm_out,
+        'f_peak_hz':  f_peak_hz,
+        'f_mean_hz':  f_mean_hz,
+        'dp_buoy':    dp_buoy,
+        'dm_buoy':    dm_buoy,
     }
 
 
 # ── figure ────────────────────────────────────────────────────────────────────
 
 def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
-              swh, T_peak, T_mean, peak_dir, wdir, wind_sig,
-              Ux, Uy, u_curr_x, u_curr_y, u_proj, quality,
-              last_navi, adp, asp, n_dirs, pics_dir,
-              buoy_proc=None):
+              swh, T_peak, T_mean, peak_dir, mean_dir, wdir, wind_sig, wspd, snr_tot,
+              Ux, Uy, u_proj, u_curr_x, u_curr_y, curr_speed, curr_dir_in, quality,
+              pulse, last_navi, adp, asp, n_dirs, pics_dir,
+              port_corr=None, k_vals=None, omega_vals=None,
+              wdir_meta=None, buoy_proc=None):
     """
     Diagnostic figure.
 
@@ -216,26 +235,28 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
     spec_2d  : shape (N_DIRS, N_FREQ), int [0..255]  — same as transmitted
     freq_out : shape (N_FREQ,), Hz
 
-    Layout (no buoy EWDM): 3×2
+    Layout (always 3 columns):
       [0,0] 1-D frequency spectrum (0..255)
       [0,1] Directional spectrum (polar, North-up clockwise)
+      [0,2] EWDM directional spectrum (buoy, if available)
       [1,0] Backscatter ring (range × azimuth, transposed)
       [1,1] Backscatter histogram (x clipped 50..200)
+      [1,2] ω-k dispersion portrait (pre-Doppler-correction)
       [2,:] Parameter table
-
-    Layout (with buoy EWDM): 3×3 — adds [0,2] EWDM polar spectrum.
     """
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.gridspec import GridSpec
 
     has_ewdm = (buoy_proc is not None and buoy_proc.get('ewdm') is not None)
-    ncols = 3 if has_ewdm else 2
-    figw  = 16 if has_ewdm else 8
+    ncols = 3
+    figw  = 16 if has_ewdm else 12
+
+    pulse_str = {1: 'SP', 2: 'MP', 3: 'LP'}.get(int(pulse), str(pulse))
 
     fig = Figure(figsize=(figw, 8))
     FigureCanvasAgg(fig)
-    fig.suptitle(name, fontsize=11, y=0.998)
+    fig.suptitle(f'{name}   [{pulse_str}]', fontsize=11, y=0.998)
 
     gs = GridSpec(3, ncols, figure=fig, height_ratios=[3, 1, 2],
                   hspace=0.45, wspace=0.30,
@@ -247,13 +268,19 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
     ax0.fill_between(freq_out, spec_1d, alpha=0.20, color='steelblue')
 
     if T_peak > 0:
-        ax0.axvline(1.0 / T_peak, color='r', ls='--', lw=1, label=f'Tp={T_peak:.1f}s')
+        ax0.axvline(1.0 / T_peak, color='steelblue', ls='-', lw=1.5, label=f'Radar Tp={T_peak:.1f}s')
     if T_mean > 0:
-        ax0.axvline(1.0 / T_mean, color='orange', ls=':', lw=1, label=f'Tm={T_mean:.1f}s')
+        ax0.axvline(1.0 / T_mean, color='steelblue', ls='--', lw=1.2, label=f'Radar Tm={T_mean:.1f}s')
 
     if buoy_proc is not None and buoy_proc.get('s_freq_255') is not None:
         ax0.plot(buoy_proc['freq_hz'], buoy_proc['s_freq_255'],
                  lw=1.2, color='tomato', alpha=0.85, label='Buoy (Welch)')
+        fp = buoy_proc.get('f_peak_hz')
+        fm = buoy_proc.get('f_mean_hz')
+        if fp and fp > 0:
+            ax0.axvline(fp, color='tomato', ls='-', lw=1.5, label=f'Buoy Tp={1/fp:.1f}s')
+        if fm and fm > 0:
+            ax0.axvline(fm, color='tomato', ls='--', lw=1.2, label=f'Buoy Tm={1/fm:.1f}s')
 
     ax0.set_xlim(0, freq_out[-1])
     ax0.set_ylim(0, 255)
@@ -301,10 +328,16 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
             ax.plot([t_r, t_r], [0, _peak_r(d_deg)], color=clr, lw=1.8, label=lbl)
             ax.plot(t_r, _peak_r(d_deg), 'o', color=clr, ms=5)
 
-        # Wind direction — white solid line
+        # Wind direction from backscatter fit — white solid line
         wind_t = np.deg2rad(wdir)
         ax.plot([wind_t, wind_t], [0, _peak_r(wdir)],
-                color='white', lw=1.5, ls='-', label=f'Wind {wdir:.0f}°')
+                color='white', lw=1.5, ls='-', label=f'Wind bck {wdir:.0f}°')
+
+        # Wind direction from ERA5 u_10/v_10 — white dashed line
+        if wdir_meta is not None:
+            wm_t = np.deg2rad(wdir_meta)
+            ax.plot([wm_t, wm_t], [0, r_max * 0.95],
+                    color='white', lw=1.5, ls='--', label=f'Wind ERA5 {wdir_meta:.0f}°')
 
         if extra_lines:
             for t_rad, r_val, clr, lbl in extra_lines:
@@ -317,7 +350,7 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
 
     # Navigation overlays
     curr_speed   = float(np.hypot(u_curr_x, u_curr_y))
-    curr_dir_deg = float(np.degrees(np.arctan2(u_curr_y, u_curr_x)) % 360)
+    curr_dir_deg = float(curr_dir_in)
     extra = [
         (np.deg2rad(last_navi.cog), _F_DISPLAY * 0.4,
          'deepskyblue', f'Ship {last_navi.sog:.1f}m/s'),
@@ -363,8 +396,19 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
             vmax_ew = float(S_disp.max()) or 1.0
             ax_ewdm.pcolormesh(theta_g_ew, r_g_ew, S_closed_ew,
                                cmap='gnuplot2', vmin=0, vmax=vmax_ew, shading='auto')
+            # dp and dm from EWDM directional spectrum
+            dp_b = buoy_proc.get('dp_buoy')
+            dm_b = buoy_proc.get('dm_buoy')
+            if dp_b is not None:
+                ax_ewdm.plot([np.deg2rad(dp_b)] * 2, [0, _F_DISPLAY * 0.9],
+                             color='white', lw=1.8, ls='-', label=f'dp={dp_b:.0f}°')
+            if dm_b is not None:
+                ax_ewdm.plot([np.deg2rad(dm_b)] * 2, [0, _F_DISPLAY * 0.9],
+                             color='lightgray', lw=1.5, ls='--', label=f'dm={dm_b:.0f}°')
+            ax_ewdm.legend(fontsize=7, loc='lower right', bbox_to_anchor=(1.35, -0.05))
             ax_ewdm.set_rlim(0, _F_DISPLAY)
             ax_ewdm.grid(False)
+            ax_ewdm.set_title('Buoy EWDM', fontsize=9, pad=10)
         except Exception as exc:
             ax_ewdm.set_title(f'EWDM plot error:\n{exc}', pad=12)
             print(f'[buoy] EWDM plot failed: {exc}')
@@ -374,9 +418,20 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
     ax2 = fig.add_subplot(gs[1, 0])
     r_lo = max(0, adp - asp)
     r_hi = r_lo + ring.shape[1]
-    # ring: (AAP, 2*ASP)  →  ring.T: (2*ASP, AAP) = (range, azimuth)
     ax2.imshow(ring.T, vmin=80, vmax=140, cmap='binary', aspect='auto',
                origin='upper', extent=[0, 360, r_hi, r_lo])
+    # Direction markers: detected wave systems + wind
+    _dir_lines = [
+        (peak_dir, 'red',    f'Sum {peak_dir:.0f}°'),
+        (wdir,     'white',  f'Wind {wdir:.0f}°'),
+    ]
+    for key, clr in [('w_s', 'cyan'), ('sw_1', 'lime'), ('sw_2', 'orange')]:
+        s = sys_dict.get(key)
+        if s:
+            _dir_lines.append((s['d_p'], clr, f'{key} {s["d_p"]:.0f}°'))
+    for d_deg, clr, lbl in _dir_lines:
+        ax2.axvline(d_deg % 360, color=clr, lw=1.4, ls='--', alpha=0.85, label=lbl)
+    ax2.legend(fontsize=6, loc='upper right', framealpha=0.5)
     ax2.set_xlabel('Azimuth [°]')
     ax2.set_ylabel('Range [px]')
 
@@ -398,6 +453,38 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
     ax3.set_title(f'std={std_v:.2f}')
     ax3.legend(fontsize=8)
 
+    # ── Panel 1,2: ω-k dispersion portrait (pre-Doppler-correction) ─────────────
+    ax_disp = fig.add_subplot(gs[1, 2])
+    if port_corr is not None and k_vals is not None and omega_vals is not None:
+        _om_max = float(omega_vals[-1])
+        _k_max  = float(k_vals[-1])
+        _k_arr  = np.linspace(0, _k_max, port_corr.shape[1])
+        _om_undist = np.sqrt(9.81 * _k_arr)
+        _om_shift  = _om_undist + _k_arr * u_proj
+
+        ax_disp.imshow(port_corr, aspect='auto', origin='lower', cmap='gnuplot2',
+                       extent=[0, _k_max, 0, _om_max],
+                       vmin=0, vmax=max(float(port_corr.max()), 1e-9))
+        ax_disp.plot(_k_arr, _om_undist, 'w--', lw=1.0, label='ω=√(gk)')
+        _mask = (_om_shift >= 0) & (_om_shift <= _om_max)
+        ax_disp.plot(_k_arr[_mask], _om_shift[_mask], color='cyan', lw=1.3,
+                     label=f'u_proj={u_proj:+.2f}')
+        ax_disp.set_xlim(0, _k_max)
+        ax_disp.set_ylim(0, _om_max)
+        ax_disp.legend(fontsize=6, loc='upper right')
+        _info = (f'Ux={Ux:+.2f} Uy={Uy:+.2f} m/s\n'
+                 f'u_proj={u_proj:+.2f} m/s\n'
+                 f'curr={curr_speed:.2f}→{curr_dir_deg:.0f}°\n'
+                 f'SOG={last_navi.sog:.2f} COG={last_navi.cog:.0f}°')
+        ax_disp.text(0.02, 0.97, _info, transform=ax_disp.transAxes,
+                     fontsize=6, va='top', color='white',
+                     bbox=dict(facecolor='black', alpha=0.55, pad=2))
+    else:
+        ax_disp.axis('off')
+    ax_disp.set_title('ω-k (pre-corr)', fontsize=8)
+    ax_disp.set_xlabel('k [rad/m]', fontsize=7)
+    ax_disp.set_ylabel('ω [rad/s]', fontsize=7)
+
     # ── Panel 2,: Parameter table ──────────────────────────────────────────────
     ax4 = fig.add_subplot(gs[2, :])
     ax4.axis('off')
@@ -408,6 +495,7 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
 
     rows = [
         ['Quality',      'GOOD' if quality else 'BAD',
+         'Pulse',        pulse_str,
          'Hs [m]',       f'{swh:.3f}',
          'Tp [s]',       f'{T_peak:.2f}',
          'Tm [s]',       f'{T_mean:.2f}',
@@ -415,26 +503,30 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
         ['N sys',        str(sys_dict['n_sys']),
          'Wind from [°]', f'{wdir:.1f}',
          'Ring std',     f'{wind_sig:.2f}',
-         'SNR tot',      '—',
-         'u_proj [m/s]', f'{u_proj:.3f}'],
+         'SNR tot',      f'{snr_tot:.2f}',
+         'WSPD [m/s]',   f'{wspd:.2f}',
+         'Dm [°]',       f'{mean_dir:.1f}'],
         ['Wind Hs [m]',  f"{ws['h_s']:.3f}"  if ws  else '—',
          'Wind Tp [s]',  f"{ws['t_p']:.2f}"  if ws  else '—',
          'Wind Dp [°]',  f"{ws['d_p']:.1f}"  if ws  else '—',
+         'Wind Tm [s]',  f"{ws['t_m']:.2f}"  if ws  else '—',
          'Ux [m/s]',     f'{Ux:.3f}',
          'Uy [m/s]',     f'{Uy:.3f}'],
         ['Sw1 Hs [m]',   f"{sw1['h_s']:.3f}" if sw1 else '—',
          'Sw1 Tp [s]',   f"{sw1['t_p']:.2f}" if sw1 else '—',
          'Sw1 Dp [°]',   f"{sw1['d_p']:.1f}" if sw1 else '—',
+         'Sw1 Tm [s]',   f"{sw1['t_m']:.2f}" if sw1 else '—',
          'Curr [m/s]',   f'{curr_speed:.3f}',
          'Curr dir [°]', f'{curr_dir_deg:.1f}'],
         ['Sw2 Hs [m]',   f"{sw2['h_s']:.3f}" if sw2 else '—',
          'Sw2 Tp [s]',   f"{sw2['t_p']:.2f}" if sw2 else '—',
          'Sw2 Dp [°]',   f"{sw2['d_p']:.1f}" if sw2 else '—',
+         'Sw2 Tm [s]',   f"{sw2['t_m']:.2f}" if sw2 else '—',
          'SOG [m/s]',    f'{last_navi.sog:.2f}',
          'COG [°]',      f'{last_navi.cog:.1f}'],
     ]
 
-    col_labels = ['Par', 'Val', 'Par', 'Val', 'Par', 'Val', 'Par', 'Val', 'Par', 'Val']
+    col_labels = ['Par', 'Val'] * 6
     tbl = ax4.table(cellText=rows, colLabels=col_labels,
                     loc='center', cellLoc='center')
     tbl.auto_set_font_size(False)
@@ -453,10 +545,11 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
 
 # ── processing ────────────────────────────────────────────────────────────────
 
-def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log):
+def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
     """
     Read first N_SHOTS frames, run full algorithm pipeline, return params dict.
     Returns (row_dict, spec_1d, spec_2d) or None on failure.
+    wind_meta: optional dict with 'u_10', 'v_10' keys (ERA5 wind components [m/s]).
     """
     cst    = cfg.const
     om_max = np.pi / (60.0 / cst.RPM)
@@ -468,7 +561,7 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log):
     dir_array  = np.linspace(0, 360, cst.N_DIRS, endpoint=False)
 
     seg_azimuths = np.linspace(0, 360, cst.NUM_AREA, endpoint=False)
-    msh = [Area(cst.ASP * 2, cst.ADP, az, 0, cst.AAP).calc_mask()
+    msh = [Area(cst.ASP * 2, cst.ADP, np.deg2rad(az), 0, cst.AAP).calc_mask()
            for az in seg_azimuths]
 
     try:
@@ -509,7 +602,7 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log):
     try:
         _, wdir = calc_wspd(last_bck)
 
-        ring     = last_bck[:, max(0, cst.ADP - cst.ASP): cst.ADP + cst.ASP]
+        ring     = last_bck[:, cst.ADP - cst.ASP: cst.ADP + cst.ASP]
         wind_sig = float(np.std(ring))
 
         spec_3d_corr = np.zeros((half, 2 * cst.K_NUM, 2 * cst.K_NUM), dtype=np.float32)
@@ -517,7 +610,9 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log):
             spec_3d_corr += calc_spec3d(cbck[i], cst.K_NUM)
         spec_3d_corr /= cst.NUM_AREA
 
-        Ux, Uy        = calc_current_vector(spec_3d_corr, k_max, om_max)
+        port_corr, _ = calc_port(spec_3d_corr)   # pre-correction, for debug portrait
+
+        Ux, Uy        = calc_current_vector(spec_3d_corr, k_max, om_max, band=_SIGNAL_BAND)
         spec_3d_fixed = apply_doppler_3d_vec(spec_3d_corr, k_max, Ux, Uy, om_max)
 
         port_fixed, _ = calc_port(spec_3d_fixed)
@@ -533,11 +628,27 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log):
         sys = calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh)
 
         cog_rad  = np.deg2rad(float(last_navi.cog))
-        u_curr_x = float(Ux) + float(last_navi.sog) * np.cos(cog_rad)
-        u_curr_y = float(Uy) + float(last_navi.sog) * np.sin(cog_rad)
+        # True current: Ux/Uy = apparent (water − ship). Add ship, then negate.
+        u_curr_x = -(float(Ux) + float(last_navi.sog) * np.sin(cog_rad))  # East [m/s]
+        u_curr_y = -(float(Uy) + float(last_navi.sog) * np.cos(cog_rad))  # North [m/s]
+        curr_speed = float(np.hypot(u_curr_x, u_curr_y))
+        curr_dir   = float(np.degrees(np.arctan2(u_curr_x, u_curr_y)) % 360)  # compass
 
+        # Apparent current projected onto dominant wave direction (for dispersion portrait)
         peak_dir_rad = np.deg2rad(peak_dir)
-        u_proj = float(u_curr_x * np.cos(peak_dir_rad) + u_curr_y * np.sin(peak_dir_rad))
+        u_proj = float(Ux * np.sin(peak_dir_rad) + Uy * np.cos(peak_dir_rad))
+
+        wspd = 0.01 * float(cst.WSPD_A + cst.WSPD_B * wind_sig)
+
+        # Wind direction from ERA5 u_10/v_10 (FROM direction, compass)
+        wdir_meta = None
+        if wind_meta:
+            u10 = float(wind_meta.get('u_10', 0.0))
+            v10 = float(wind_meta.get('v_10', 0.0))
+            if u10 != 0.0 or v10 != 0.0:
+                # u10/v10 are East/North components of wind blowing toward that direction
+                # FROM direction = opposite: arctan2(u10, v10) + 180°
+                wdir_meta = float((np.degrees(np.arctan2(u10, v10)) + 180) % 360)
 
         quality = int(
             snr_tot    >= _SNR_QUALITY_MIN
@@ -580,10 +691,11 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log):
         try:
             _save_pic(
                 name, spec_1d, spec_2d, freq_out, ring, sys,
-                swh, T_peak, T_mean, peak_dir, wdir, wind_sig,
-                Ux, Uy, u_curr_x, u_curr_y, u_proj, quality,
-                last_navi, cst.ADP, cst.ASP, cst.N_DIRS, pics_dir,
-                buoy_proc=buoy_proc,
+                swh, T_peak, T_mean, peak_dir, mean_dir, wdir, wind_sig, wspd, snr_tot,
+                Ux, Uy, u_proj, u_curr_x, u_curr_y, curr_speed, curr_dir, quality,
+                pulse, last_navi, cst.ADP, cst.ASP, cst.N_DIRS, pics_dir,
+                port_corr=port_corr, k_vals=k_vals, omega_vals=omega_vals,
+                wdir_meta=wdir_meta, buoy_proc=buoy_proc,
             )
         except Exception as exc:
             log.warning(f'{name}: pic save failed: {exc}', exc_info=True)
@@ -604,10 +716,14 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log):
         'wd_p':     float(ws['d_p']) if ws else 0.0,
         **_sys_fields('sw1', sys.get('sw_1')),
         **_sys_fields('sw2', sys.get('sw_2')),
-        'ide_sys':  int(sys['n_sys']),
-        'u_proj':   float(u_proj),
-        'u_x':      float(u_curr_x),
-        'u_y':      float(u_curr_y),
+        'ide_sys':    int(sys['n_sys']),
+        'curr_speed': float(curr_speed),
+        'curr_dir':   float(curr_dir),
+        'curr_x':     float(u_curr_x),
+        'curr_y':     float(u_curr_y),
+        'wspd_proc':       float(wspd),
+        'u_x':        float(Ux),
+        'u_y':        float(Uy),
         'wind_sig': float(wind_sig),
         'wind_dir': float(wdir),
         'sog_proc': float(last_navi.sog),
@@ -647,7 +763,17 @@ def main():
         path = args.base_path + row['name']
 
         try:
-            result = _process_file(name, path, cfg, spec_dir, pics_dir, log)
+            wind_meta = None
+            for col in ('u_10', 'v_10'):
+                if col not in df.columns:
+                    break
+            else:
+                u10, v10 = row.get('u_10'), row.get('v_10')
+                if pd.notna(u10) and pd.notna(v10):
+                    wind_meta = {'u_10': float(u10), 'v_10': float(v10)}
+
+            result = _process_file(name, path, cfg, spec_dir, pics_dir, log,
+                                   wind_meta=wind_meta)
             if result is None:
                 log.warning(f'{name}: processing failed')
                 continue
@@ -656,10 +782,10 @@ def main():
             for key, value in params.items():
                 df.loc[i, key] = value
 
-            np.save(os.path.join(spec_dir, f'{name}_freqspec.npy'), spec_1d)
-            np.save(os.path.join(spec_dir, f'{name}_dirspec.npy'),  spec_2d)
+            # np.save(os.path.join(spec_dir, f'{name}_freqspec.npy'), spec_1d)
+            # np.save(os.path.join(spec_dir, f'{name}_dirspec.npy'),  spec_2d)
 
-            df.to_csv(params_path, index=False)
+            df.to_csv(params_path, index=False, float_format='%.2f')
             log.info(f'{name}: done  quality={params["quality"]}')
 
         except Exception as exc:

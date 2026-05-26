@@ -225,7 +225,7 @@ class Processor:
         # All NUM_AREA segments positioned at equal azimuth steps, non-rotated
         self.seg_azimuths = np.linspace(0, 360, self.cst.NUM_AREA, endpoint=False)
         self.msh = [
-            Area(self.cst.ASP * 2, self.cst.ADP, ang, 0, self.cst.AAP).calc_mask()
+            Area(self.cst.ASP * 2, self.cst.ADP, np.deg2rad(ang), 0, self.cst.AAP).calc_mask()
             for ang in self.seg_azimuths
         ]
 
@@ -292,12 +292,6 @@ class Processor:
             signal, noise = separate_signal_noise(port_fixed, k_vals, self.om_max, band=_SIGNAL_BAND)
             signal_mtf = apply_mtf(signal, k_vals, exp=1.2)
 
-            # Wavelength from k-spectrum peak (direct measurement, no dispersion assumption)
-            s_k = signal.sum(axis=0)
-            s_k[0] = 0.0
-            k_peak_idx = int(np.argmax(s_k))
-            lam_peak = int(round(2 * np.pi / k_vals[k_peak_idx])) if k_vals[k_peak_idx] > 0 else 0
-
             snr_tot = compute_snr(signal_mtf, noise)
             s_omega, m0, T_peak, T_mean = compute_frequency_spectrum(signal_mtf, k_vals, omega_vals)
 
@@ -343,17 +337,16 @@ class Processor:
                 _log.info(msg)
                 print(msg)
 
-            # True ocean current: add back ship velocity (SOG/COG, m/s)
-            # Image is always north-up, so (Ux, Uy) are in geographic (North, East) frame.
-            # Ship velocity in the same frame: SOG·(cos(COG), sin(COG)).
-            cog_rad = np.deg2rad(float(np.mean(s.cog)))
-            sog_mean = float(np.mean(s.speed))  # [m/s], already in m/s from parser
-            u_curr_x = float(Ux) + sog_mean * np.cos(cog_rad)
-            u_curr_y = float(Uy) + sog_mean * np.sin(cog_rad)
+            # True ocean current: Ux/Uy = apparent (water − ship). Add ship, then negate.
+            cog_rad  = np.deg2rad(float(np.mean(s.cog)))
+            sog_mean = float(np.mean(s.speed))
+            u_curr_x = -(float(Ux) + sog_mean * np.sin(cog_rad))  # East [m/s]
+            u_curr_y = -(float(Uy) + sog_mean * np.cos(cog_rad))  # North [m/s]
+            curr_speed = float(np.hypot(u_curr_x, u_curr_y))
+            # Compass bearing: arctan2(East, North) = bearing from North, clockwise
+            curr_dir = float(np.degrees(np.arctan2(u_curr_x, u_curr_y)) % 360)
 
-            # Projection onto dominant wave direction [m/s]
-            peak_dir_rad = np.deg2rad(peak_dir)
-            u_proj = float(u_curr_x * np.cos(peak_dir_rad) + u_curr_y * np.sin(peak_dir_rad))
+            wspd = 0.01 * float(cst.WSPD_A + cst.WSPD_B * ring_sig)
 
             # Interpolate spectra onto output frequency grid
             spec_1d = np.interp(np.linspace(0, self.om_max, cst.N_FREQ), omega_vals, s_omega)
@@ -389,9 +382,11 @@ class Processor:
                 result.sog_proc = navi.sog
                 result.cog_proc = navi.cog
                 result.n_start = round(navi.hdg)
-                result.u_proj = u_proj  # packed into vco slot of UDP packet
-                result.lam_peak = lam_peak  # wavelength from k-spectrum peak [m]
-                result.n_dis = quality    # quality flag transmitted in legacy n_dis slot (un[29])
+                result.curr_speed = curr_speed  # vco slot (un[26])
+                result.curr_dir  = curr_dir    # repurposed rps slot (un[3])
+                result.wind_dir  = wdir        # repurposed n_area slot (un[7])
+                result.wspd      = wspd        # repurposed step_area slot (un[6])
+                result.n_dis = quality    # quality flag (un[25])
 
         s.index += 1
         return {

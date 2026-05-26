@@ -15,8 +15,8 @@ class Area:
         """
         self.size = size
         self.dist = dist
-        self.azim = np.rad2deg(azim)
-        self.orient = np.rad2deg(orient)
+        self.azim = azim
+        self.orient = orient
         self.aap = aap
 
     def get_vertex(self):

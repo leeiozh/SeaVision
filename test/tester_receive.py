@@ -16,9 +16,9 @@ F_DISPLAY = 0.20          # radial limit for polar display [Hz] (must be ≤ F_M
 N_DISPLAY = round(F_DISPLAY / F_MAX * N_FREQS)  # ≈ 62 bins to show
 
 # ── Packet format ──────────────────────────────────────────────────────────────
-_HDR_FMT  = "<BBHHBBHHHHHBBHHHHHHHHHHHHHHHHHh"
-_HDR_SIZE = struct.calcsize(_HDR_FMT)                # 56 bytes
-_PKT_SIZE = _HDR_SIZE + N_FREQS + N_FREQS * N_AREA  # 56 + 64 + 2304 = 2424 bytes
+_HDR_FMT  = "<BBHHBBHHHHHBBHHHHHHHHHHHHHhHH"
+_HDR_SIZE = struct.calcsize(_HDR_FMT)                # 52 bytes
+_PKT_SIZE = _HDR_SIZE + N_FREQS + N_FREQS * N_AREA  # 52 + 64 + 2304 = 2420 bytes
 
 _PULSE = {1: "SP", 2: "MP", 3: "LP"}
 
@@ -114,7 +114,7 @@ def _decode(data: bytes):
         print(f"Unexpected packet type: {un[0]}")
         return None
 
-    spec_1d = np.array(un[31:31 + N_FREQS], dtype=np.float32)
+    spec_1d = np.array(un[29:29 + N_FREQS], dtype=np.float32)
 
     if len(data) >= _PKT_SIZE:
         spec_2d = (np.frombuffer(data[n_hdr_spec:_PKT_SIZE], dtype=np.uint8)
@@ -122,41 +122,38 @@ def _decode(data: bytes):
     else:
         spec_2d = np.zeros((N_AREA, N_FREQS), dtype=np.float32)
 
-    vco      = un[30] / 100.0
     dir_sum  = round(un[14] / 100.0)
-    curr_dir = dir_sum if vco >= 0 else (dir_sum + 180) % 360
 
     return {
         'pulse':    un[1],
         'step':     un[2] / 1000.0,
-        'hdg':      un[8],            # repurposed n_start field → integer degrees
+        'rps':      un[3] / 100.0,
+        'hdg':      un[8],
         'cog':      round(un[9] / 100.0),
         'sog':      un[10] / 100.0,
         # Summary wave
         'swh_sum':  un[13] / 100.0,
         'dir_sum':  dir_sum,
         'per_sum':  un[15] / 100.0,
-        'len_sum':  float(un[16]),
         # Wind wave
-        'swh_win':  un[17] / 100.0,
-        'dir_win':  round(un[18] / 100.0),
-        'per_win':  un[19] / 100.0,
-        'len_win':  float(un[20]),
+        'swh_win':  un[16] / 100.0,
+        'dir_win':  round(un[17] / 100.0),
+        'per_win':  un[18] / 100.0,
         # Swell 1
-        'swh_sw1':  un[21] / 100.0,
-        'dir_sw1':  round(un[22] / 100.0),
-        'per_sw1':  un[23] / 100.0,
-        'len_sw1':  float(un[24]),
+        'swh_sw1':  un[19] / 100.0,
+        'dir_sw1':  round(un[20] / 100.0),
+        'per_sw1':  un[21] / 100.0,
         # Swell 2
-        'swh_sw2':  un[25] / 100.0,
-        'dir_sw2':  round(un[26] / 100.0),
-        'per_sw2':  un[27] / 100.0,
-        'len_sw2':  float(un[28]),
-        # Current
-        'vco':      vco,
-        'curr_spd': abs(vco),
-        'curr_dir': curr_dir,
-        'quality':  un[29],   # repurposed n_dis field: 1 = good, 0 = suspect
+        'swh_sw2':  un[22] / 100.0,
+        'dir_sw2':  round(un[23] / 100.0),
+        'per_sw2':  un[24] / 100.0,
+        # Current: un[7]=curr_dir [°], un[11]=curr_speed [cm/s uint8]
+        'curr_spd': un[11] / 100.0,
+        'curr_dir': un[7],
+        # Wind: un[27]=wind_dir [°], un[28]=wspd×10
+        'wspd':     un[28] / 10.0,
+        'wind_dir': un[27],
+        'quality':  un[25],
         'spec_1d':  spec_1d,
         'spec_2d':  spec_2d,
     }
@@ -188,21 +185,21 @@ def _update(fig, ax1, line1d, fill1d, ax2, pcm, dir_lines, info, d: dict):
     # ── parameter table (text is cheap) ────────────────────────────────────
     SEP = '─' * 48
 
-    def wrow(name, swh, dr, per, llen):
+    def wrow(name, swh, dr, per):
         if per < 0.1:          # system not detected
             return f"  {name:<10}  —"
-        return f"  {name:<10} {swh:5.2f}m  {dr:5.0f}°  {per:5.1f}s  {llen:5.0f}m"
+        return f"  {name:<10} {swh:5.2f}m  {dr:5.0f}°  {per:5.1f}s"
 
     txt = (
-        f"  {'':<10} {'SWH':>5}   {'Dir':>4}   {'T':>4}   {'L':>5}\n"
+        f"  {'':<10} {'SWH':>5}   {'Dir':>4}   {'T':>4}\n"
         f"  {SEP}\n"
-        f"{wrow('Summary',   d['swh_sum'], d['dir_sum'], d['per_sum'], d['len_sum'])}\n"
-        f"{wrow('Wind wave', d['swh_win'], d['dir_win'], d['per_win'], d['len_win'])}\n"
-        f"{wrow('Swell 1',   d['swh_sw1'], d['dir_sw1'], d['per_sw1'], d['len_sw1'])}\n"
-        f"{wrow('Swell 2',   d['swh_sw2'], d['dir_sw2'], d['per_sw2'], d['len_sw2'])}\n"
+        f"{wrow('Summary',   d['swh_sum'], d['dir_sum'], d['per_sum'])}\n"
+        f"{wrow('Wind wave', d['swh_win'], d['dir_win'], d['per_win'])}\n"
+        f"{wrow('Swell 1',   d['swh_sw1'], d['dir_sw1'], d['per_sw1'])}\n"
+        f"{wrow('Swell 2',   d['swh_sw2'], d['dir_sw2'], d['per_sw2'])}\n"
         f"  {SEP}\n"
-        f"  {'Current:':<12} {d['curr_spd']:5.2f} m/s  → {d['curr_dir']:4.0f}°\n"
-        f"  {'Wind dir:':<12}              → {d['dir_win']:4.0f}°\n"
+        f"  {'Current:':<12} {d['curr_spd']:5.2f} m/s  → {d['curr_dir']:4}°\n"
+        f"  {'Wind:':<12}     {d['wspd']:5.2f} m/s  → {d['wind_dir']:4}°\n"
         f"  {SEP}\n"
         f"  SOG: {d['sog']:.2f} kn   COG: {d['cog']}°   HDG: {d['hdg']}°\n"
         f"  step: {d['step']:.3f} m   [{_PULSE.get(d['pulse'], '?')}]"
@@ -213,7 +210,7 @@ def _update(fig, ax1, line1d, fill1d, ax2, pcm, dir_lines, info, d: dict):
     fig.suptitle(
         f"SWH = {d['swh_sum']:.2f} m   Dir = {d['dir_sum']}°   "
         f"T = {d['per_sum']:.1f} s   "
-        f"Curr = {d['curr_spd']:.2f} m/s → {d['curr_dir']}°   "
+        f"Curr = {d['curr_spd']:.2f} m/s → {d['curr_dir']}°   Wind = {d['wspd']:.1f} m/s → {d['wind_dir']}°   "
         f"SOG {d['sog']:.1f} kn   [{_PULSE.get(d['pulse'], '?')}]",
         fontsize=11,
     )
@@ -236,7 +233,7 @@ if __name__ == '__main__':
         _update(fig, ax1, line1d, fill1d, ax2, pcm, dir_lines, info, d)
         print(
             f"SWH={d['swh_sum']:.2f}m  Dir={d['dir_sum']}°  T={d['per_sum']:.1f}s  "
-            f"Curr={d['curr_spd']:.2f}m/s→{d['curr_dir']}°  "
+            f"Curr={d['curr_spd']:.2f}m/s  "
             f"SOG={d['sog']:.1f}kn  COG={d['cog']}°  HDG={d['hdg']}°  "
             f"[{_PULSE.get(d['pulse'], '?')}]"
         )

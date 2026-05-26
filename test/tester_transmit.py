@@ -1,10 +1,11 @@
+import gc
 import socket
 import struct
 import time
 import numpy as np
 from netCDF4 import Dataset
 
-NETCDF_FILE = "/media/leeiozh/EZH/DATA/old_radar_data/0606_4392.nc"
+NETCDF_FILE = "/media/leeiozh/EZH/DATA/old_radar_data/0606_4340.nc"
 SERVER_IP = '127.0.0.1'
 PRLI_PORT = 4001
 NAVI_PORT = 4002
@@ -50,17 +51,25 @@ def send_prli_packets(bcksctr, step, pulse):
 def stream_data():
     with Dataset(NETCDF_FILE, 'r') as ds:
         n = len(ds['lat_radar'])
+        # Load all nav arrays upfront — small, avoids repeated HDF5 scalar reads
+        lat_arr = np.asarray(ds['lat_radar'][:])
+        lon_arr = np.asarray(ds['lon_radar'][:])
+        sog_arr = np.asarray(ds['sog_radar'][:])
+        hdg_arr = np.asarray(ds['giro_radar'][:])
+        cog_arr = np.asarray(ds['cog_radar'][:])
+
         for i in range(n):
-            lat = float(ds['lat_radar'][i])
-            lon = float(ds['lon_radar'][i])
-            sog = float(ds['sog_radar'][i])
-            hdg = float(ds['giro_radar'][i])
-            cog = float(ds['cog_radar'][i])
-            bck = ds['bsktr_radar'][i]
+            # np.asarray detaches bck from the HDF5 object immediately
+            bck = np.asarray(ds['bsktr_radar'][i])
             mean_bck = float(bck[:, ADP - ASP:ADP + ASP].mean())
-            send_navi_packet(lat, lon, sog, hdg, cog, sog)
-            print(f"[{i + 1}/{n}]  lat={lat:.6f}  lon={lon:.6f}  mean_bck={mean_bck:.1f}")
+            send_navi_packet(float(lat_arr[i]), float(lon_arr[i]),
+                             float(sog_arr[i]), float(hdg_arr[i]),
+                             float(cog_arr[i]), float(sog_arr[i]))
+            print(f"[{i + 1}/{n}]  lat={lat_arr[i]:.6f}  lon={lon_arr[i]:.6f}  mean_bck={mean_bck:.1f}")
             send_prli_packets(bck, 1.875, 1)
+            del bck
+            if i % 100 == 99:
+                gc.collect()
             time.sleep(ROTATION_SLEEP)
     print("Stream complete")
 

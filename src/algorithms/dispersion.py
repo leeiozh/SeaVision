@@ -58,7 +58,7 @@ def calc_vco(port, om_max, k_max):
     return float(num / den) if den > 0 else 0.0
 
 
-def calc_current_vector(spec_3d, k_max, om_max):
+def calc_current_vector(spec_3d, k_max, om_max, band):
     """
     Estimate current velocity vector (Ux, Uy) [m/s] from the averaged 3D spectrum
     via weighted least-squares fit of the dispersion centroid displacement:
@@ -70,7 +70,6 @@ def calc_current_vector(spec_3d, k_max, om_max):
     """
     n_om, n2, _ = spec_3d.shape
     k_num = n2 // 2
-    band = max(8, round(0.15 * n_om))
 
     kx_arr = np.arange(-k_num, k_num, dtype=float) / k_num * k_max
     ky_arr = np.arange(-k_num, k_num, dtype=float) / k_num * k_max

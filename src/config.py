@@ -15,6 +15,8 @@ class Constants:
     NUM_AREA: int
     SNR_A: int
     SNR_B: int
+    WSPD_A: float
+    WSPD_B: float
     MEAN: int
     CHANGE_DIR_NUM_SHOTS: int
     RPM: int
@@ -50,6 +52,8 @@ def load_config(path: str) -> AppConfig:
         NUM_AREA=cfg.getint("constants", "NUM_AREA"),
         SNR_A=cfg.getint("constants", "SNR_A"),
         SNR_B=cfg.getint("constants", "SNR_B"),
+        WSPD_A=cfg.getfloat("constants", "WSPD_A"),
+        WSPD_B=cfg.getfloat("constants", "WSPD_B"),
         MEAN=cfg.getint("constants", "MEAN"),
         CHANGE_DIR_NUM_SHOTS=cfg.getint("constants", "CHANGE_DIR_NUM_SHOTS"),
         RPM=cfg.getint("constants", "RPM"),
