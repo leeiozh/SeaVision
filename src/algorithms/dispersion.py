@@ -58,18 +58,19 @@ def calc_vco(port, om_max, k_max):
     return float(num / den) if den > 0 else 0.0
 
 
-def calc_current_vector(spec_3d, k_max, om_max, band):
+def calc_current_vector(spec_3d, k_max, om_max, band, sog=0.0, cog_deg=0.0):
     """
-    Two-pass estimation of (Ux, Uy) [m/s] from the 3-D spectrum via
-    dispersion-centroid least-squares:  ω̄(kx,ky) − √(g|k|) = kx·Ux + ky·Uy
+    Two-pass estimation of (Ux, Uy) [m/s] from the 3-D spectrum.
+    Equation: ω_peak(kx,ky) − √(g|k|) = kx·Ux + ky·Uy, solved by weighted least-squares.
 
-    Pass 1 — wide window (n_om//4) centred on undisturbed curve.
-              Catches the energy peak even when the Doppler shift is large
-              (e.g. high ship speed). Fixes bias toward (0, 0) at high SOG.
-    Pass 2 — narrow window (band bins) centred on the Pass-1 shifted curve.
-              Suppresses off-curve noise; refines the estimate.
+    Pass 1 — argmax in wide window centred on ship-velocity-shifted dispersion curve.
+              The ship-velocity prior ensures the window contains the wave energy even
+              at high SOG; argmax finds the peak without centroid bias at window edges.
+    Pass 2 — energy centroid in narrow window centred on Pass-1 result.
+              Gives sub-bin precision around the already-well-centred peak.
 
     Returns (Ux, Uy) [m/s] in geographic (East, North) frame.
+    (Ux, Uy) = apparent velocity = water_current − ship_velocity.
     """
     n_om, n2, _ = spec_3d.shape
     k_num = n2 // 2
@@ -86,12 +87,45 @@ def calc_current_vector(spec_3d, k_max, om_max, band):
     k_hi = k_max * 0.65
     i_vals, j_vals = np.where((K_abs > k_lo) & (K_abs < k_hi))
 
-    def _lstsq_pass(Ux_prior, Uy_prior, win):
+    # Ship moves at (sog, cog_deg) → apparent velocity ≈ −ship_velocity as first guess
+    cog_rad = np.deg2rad(cog_deg)
+    Ux_ship = -sog * np.sin(cog_rad)
+    Uy_ship = -sog * np.cos(cog_rad)
+
+    def _argmax_pass(Ux_p, Uy_p, win):
+        """Peak position (argmax) within window — no centroid bias at window edges."""
         eq_A, eq_b, eq_w = [], [], []
         for i, j in zip(i_vals, j_vals):
-            # Centre the search window on the SHIFTED dispersion curve
-            om_ctr = float(omega_ref[i, j]
-                           + KX[i, j] * Ux_prior + KY[i, j] * Uy_prior)
+            om_ctr = float(omega_ref[i, j] + KX[i, j] * Ux_p + KY[i, j] * Uy_p)
+            ci = int(round(om_ctr / om_max * (n_om - 1)))
+            ci = max(0, min(n_om - 1, ci))
+            lo = max(1, ci - win)
+            hi = min(n_om, ci + win + 1)
+            if hi <= lo:
+                continue
+            sl = spec_3d[lo:hi, i, j].astype(np.float64)
+            pk = int(np.argmax(sl))
+            peak_val = float(sl[pk])
+            if peak_val <= 0:
+                continue
+            eq_A.append([float(KX[i, j]), float(KY[i, j])])
+            eq_b.append(float(om_arr[lo + pk]) - float(omega_ref[i, j]))
+            eq_w.append(peak_val)
+
+        if len(eq_A) < 10:
+            return Ux_p, Uy_p
+
+        A = np.array(eq_A)
+        b = np.array(eq_b)
+        wsq = np.sqrt(np.array(eq_w))
+        res, _, _, _ = np.linalg.lstsq(A * wsq[:, None], b * wsq, rcond=None)
+        return float(res[0]), float(res[1])
+
+    def _centroid_pass(Ux_p, Uy_p, win):
+        """Energy centroid in narrow window — sub-bin precision when well-centred."""
+        eq_A, eq_b, eq_w = [], [], []
+        for i, j in zip(i_vals, j_vals):
+            om_ctr = float(omega_ref[i, j] + KX[i, j] * Ux_p + KY[i, j] * Uy_p)
             ci = int(round(om_ctr / om_max * (n_om - 1)))
             ci = max(0, min(n_om - 1, ci))
             lo = max(1, ci - win)
@@ -108,7 +142,7 @@ def calc_current_vector(spec_3d, k_max, om_max, band):
             eq_w.append(w)
 
         if len(eq_A) < 10:
-            return 0.0, 0.0
+            return Ux_p, Uy_p
 
         A = np.array(eq_A)
         b = np.array(eq_b)
@@ -116,12 +150,12 @@ def calc_current_vector(spec_3d, k_max, om_max, band):
         res, _, _, _ = np.linalg.lstsq(A * wsq[:, None], b * wsq, rcond=None)
         return float(res[0]), float(res[1])
 
-    # Pass 1: wide window — always finds the peak regardless of Doppler offset
+    # Pass 1: argmax, wide window, centred on ship-shifted dispersion curve
     wide = max(band, n_om // 4)
-    Ux, Uy = _lstsq_pass(0.0, 0.0, wide)
+    Ux, Uy = _argmax_pass(Ux_ship, Uy_ship, wide)
 
-    # Pass 2: narrow window centred on Pass-1 shifted curve
-    Ux, Uy = _lstsq_pass(Ux, Uy, band)
+    # Pass 2: centroid, narrow window, centred on Pass-1 result (sub-bin refinement)
+    Ux, Uy = _centroid_pass(Ux, Uy, band)
 
     return Ux, Uy
 

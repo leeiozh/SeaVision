@@ -680,7 +680,8 @@ def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
 
         port_corr, _ = calc_port(spec_3d_corr)   # pre-correction, for debug portrait
 
-        Ux, Uy        = calc_current_vector(spec_3d_corr, k_max, om_max, band=_SIGNAL_BAND)
+        Ux, Uy        = calc_current_vector(spec_3d_corr, k_max, om_max, band=_SIGNAL_BAND,
+                                            sog=sog_mean, cog_deg=cog_mean)
         spec_3d_fixed = apply_doppler_3d_vec(spec_3d_corr, k_max, Ux, Uy, om_max)
 
         port_fixed, _ = calc_port(spec_3d_fixed)
