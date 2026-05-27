@@ -49,8 +49,8 @@ def _chunk_worker(args):
     q = queue.Queue(maxsize=1)
 
     def _reader():
-        for name, nc_path, wind_meta in task_list:
-            data = _load_frames(name, nc_path, cfg, log)
+        for name, nc_path, pul, wind_meta in task_list:
+            data = _load_frames(name, nc_path, pul, cfg, log)
             q.put((name, wind_meta, data))
         q.put(_SENTINEL)
 
@@ -86,7 +86,7 @@ def _run(file_pairs, cfg, spec_dir, pics_dir, log, n_workers, out_csv):
         except Exception as exc:
             log.warning(f'Could not read existing {out_csv}: {exc}')
 
-    pending = [(n, p, wm) for n, p, wm in file_pairs if n not in done]
+    pending = [(n, p, pul, wm) for n, p, pul, wm in file_pairs if n not in done]
     if not pending:
         log.info('All files already processed')
         return
@@ -206,9 +206,10 @@ def main():
         name    = row['name'].split('/')[-1][:-3]
         nc_path = os.path.join(args.base_path, row['name'])
         wind_meta = None
+        pul = row.get("pulse")
         if has_wind and pd.notna(row.get('u_10')) and pd.notna(row.get('v_10')):
             wind_meta = {'u_10': float(row['u_10']), 'v_10': float(row['v_10'])}
-        file_pairs.append((name, nc_path, wind_meta))
+        file_pairs.append((name, nc_path, pul, wind_meta))
 
     _run(file_pairs, cfg, spec_dir, pics_dir, log, args.n_workers, out_csv)
 
