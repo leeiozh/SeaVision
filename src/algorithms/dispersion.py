@@ -87,7 +87,7 @@ def calc_current_vector(spec_3d, k_max, om_max, band, sog=0.0, cog_deg=0.0, max_
     omega_ref = np.sqrt(9.81 * K_abs)
 
     k_lo = k_max * 0.08
-    k_hi = k_max * 0.65
+    k_hi = k_max * 0.45
     # Exclude cells where the unshifted dispersion curve exceeds the Nyquist ω.
     # Those cells always produce a negative ω-residual (ω_ref is clipped to n_om-1)
     # and systematically bias the velocity regression.
