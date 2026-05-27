@@ -109,8 +109,8 @@ def _dispersion_centroids(spec_3d, k_max, om_max, sog=0.0, cog_deg=0.0):
     omega_ref = np.sqrt(9.81 * K_abs)
 
     k_lo = k_max * 0.08
-    k_hi = k_max * 0.65
-    i_vals, j_vals = np.where((K_abs > k_lo) & (K_abs < k_hi))
+    k_hi = k_max * 0.45
+    i_vals, j_vals = np.where((K_abs > k_lo) & (K_abs < k_hi) & (omega_ref < om_max))
 
     cog_rad = np.deg2rad(cog_deg)
     Ux_prior = sog * np.sin(cog_rad)
@@ -817,25 +817,33 @@ def main():
     df = pd.read_csv(args.csv)
     if 'pulse' in df.columns:
         df['pulse'] = df['pulse'].apply(_pulse_str)
-    for field in _PARAMS_FIELDS:
-        if field not in df.columns:
-            df[field] = np.nan
 
+    # Resume: skip files already written to params.csv
+    done = set()
+    if os.path.exists(params_path):
+        try:
+            done = set(pd.read_csv(params_path, usecols=['name'])['name'].dropna())
+            if done:
+                log.info(f'Resume: skipping {len(done)} already-done files')
+        except Exception as exc:
+            log.warning(f'Could not read existing {params_path}: {exc}')
+
+    write_header = not os.path.exists(params_path)
+    n_done = 0
+
+    has_wind = {'u_10', 'v_10'}.issubset(df.columns)
     log.info(f"Batch: {len(df)} rows → '{args.out}'  (N_SHOTS={cfg.const.N_SHOTS})")
 
-    for i, row in df.iterrows():
+    for _, row in df.iterrows():
         name = row['name'].split('/')[-1][:-3]
+        if name in done:
+            continue
         path = args.base_path + row['name']
-        pulse = row["pulse"]
+        pulse = row.get('pulse', 'MP')
         try:
             wind_meta = None
-            for col in ('u_10', 'v_10'):
-                if col not in df.columns:
-                    break
-            else:
-                u10, v10 = row.get('u_10'), row.get('v_10')
-                if pd.notna(u10) and pd.notna(v10):
-                    wind_meta = {'u_10': float(u10), 'v_10': float(v10)}
+            if has_wind and pd.notna(row.get('u_10')) and pd.notna(row.get('v_10')):
+                wind_meta = {'u_10': float(row['u_10']), 'v_10': float(row['v_10'])}
 
             result = _process_file(name, path, pulse, cfg, spec_dir, pics_dir, log,
                                    wind_meta=wind_meta)
@@ -844,22 +852,23 @@ def main():
                 continue
 
             params, spec_1d, spec_2d = result
-            for key, value in params.items():
-                df.loc[i, key] = value
-
-            # np.save(os.path.join(spec_dir, f'{name}_freqspec.npy'), spec_1d)
-            # np.save(os.path.join(spec_dir, f'{name}_dirspec.npy'),  spec_2d)
-
-            df.to_csv(params_path, index=False, float_format='%.2f')
-            log.info(f'{name}: done  quality={params["quality"]}')
+            try:
+                pd.DataFrame([params]).reindex(columns=_PARAMS_FIELDS).to_csv(
+                    params_path, mode='a', header=write_header, index=False,
+                    float_format='%.4f'
+                )
+                write_header = False
+                n_done += 1
+                log.info(f'[{n_done}] {name}: quality={params["quality"]}  swh={params["swh"]:.2f}m')
+            except Exception as exc:
+                log.error(f'{name}: CSV write failed: {exc}', exc_info=True)
 
         except Exception as exc:
             log.error(f'{name}: fatal error: {exc}', exc_info=True)
-            df.to_csv(params_path, index=False)
         finally:
-            gc.collect()  # flush HDF5 file descriptors before next file
+            gc.collect()
 
-    log.info(f"Done. Params → '{params_path}'")
+    log.info(f"Done: {n_done} new rows → '{params_path}'")
 
 
 if __name__ == '__main__':

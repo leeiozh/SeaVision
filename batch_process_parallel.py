@@ -100,13 +100,16 @@ def _run(file_pairs, cfg, spec_dir, pics_dir, log, n_workers, out_csv):
         if res is None:
             return
         row, _s1, _s2 = res
-        pd.DataFrame([row]).reindex(columns=_PARAMS_FIELDS).to_csv(
-            out_csv, mode='a', header=write_header, index=False, float_format='%.4f'
-        )
-        write_header = False
-        n_done += 1
-        log.info(f'[{n_done}/{len(pending)}] {name}: '
-                 f'quality={row["quality"]}  swh={row["swh"]:.2f}m')
+        try:
+            pd.DataFrame([row]).reindex(columns=_PARAMS_FIELDS).to_csv(
+                out_csv, mode='a', header=write_header, index=False, float_format='%.4f'
+            )
+            write_header = False
+            n_done += 1
+            log.info(f'[{n_done}/{len(pending)}] {name}: '
+                     f'quality={row["quality"]}  swh={row["swh"]:.2f}m')
+        except Exception as exc:
+            log.error(f'{name}: CSV write failed: {exc}', exc_info=True)
 
     if n_workers > 1:
         # Split into n_workers contiguous chunks; each worker gets its own slice
