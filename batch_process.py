@@ -18,7 +18,6 @@ Output:
 import argparse
 import gc
 import os
-import time
 import traceback
 import numpy as np
 import pandas as pd
@@ -118,7 +117,7 @@ def _dispersion_centroids(spec_3d, k_max, om_max, sog=0.0, cog_deg=0.0):
     Uy_prior = sog * np.cos(cog_rad)
 
     win = max(10, n_om // 16)
-    k_list, om_list = [], []
+    k_list, om_list, w_list = [], [], []
     for i, j in zip(i_vals, j_vals):
         om_ctr = float(omega_ref[i, j] + KX[i, j] * Ux_prior + KY[i, j] * Uy_prior)
         ci = int(round(om_ctr / om_max * (n_om - 1)))
@@ -133,8 +132,9 @@ def _dispersion_centroids(spec_3d, k_max, om_max, sog=0.0, cog_deg=0.0):
             continue
         k_list.append(float(K_abs[i, j]))
         om_list.append(float(om_arr[lo + pk]))
+        w_list.append(float(sl[pk]))
 
-    return np.array(k_list), np.array(om_list)
+    return np.array(k_list), np.array(om_list), np.array(w_list)
 
 
 # ── buoy data (batch only, not production) ────────────────────────────────────
@@ -287,7 +287,7 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
               pulse, last_navi, adp, asp, n_dirs, pics_dir,
               port_corr=None, k_vals=None, omega_vals=None,
               wdir_meta=None, buoy_proc=None,
-              cent_k=None, cent_om=None, u_ship_proj=0.0,
+              cent_k=None, cent_om=None, cent_w=None, u_ship_proj=0.0,
               sog_mean=0.0, cog_mean=0.0):
     """
     Diagnostic figure.
@@ -525,12 +525,19 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
 
         ax_disp.imshow(port_corr, aspect='auto', origin='lower', cmap='gnuplot2',
                        extent=[0, _k_max, 0, _om_max],
-                       vmin=0, vmax=max(float(port_corr.max()), 1e-9))
+                       vmin=0, vmax=max(float(port_corr.max()), 1e-9),
+                       interpolation='none')
 
         # Centroid scatter — where energy actually sits (Pass-1 wide window)
         if cent_k is not None and len(cent_k) > 0:
-            ax_disp.scatter(cent_k, cent_om, s=3, c='red', alpha=0.35,
-                            linewidths=0, zorder=3, label='centroids')
+            if cent_w is not None and len(cent_w) == len(cent_k) and cent_w.max() > 0:
+                w_norm = cent_w / cent_w.max()
+                ax_disp.scatter(cent_k, cent_om, s=2 + 20 * w_norm, c=w_norm,
+                                cmap='hot', vmin=0, vmax=1, alpha=0.55,
+                                linewidths=0, zorder=3, label='centroids')
+            else:
+                ax_disp.scatter(cent_k, cent_om, s=3, c='red', alpha=0.35,
+                                linewidths=0, zorder=3, label='centroids')
 
         ax_disp.plot(_k_arr, _om_undist, 'w--', lw=1.0, label='ω=√(gk)')
 
@@ -632,14 +639,11 @@ def _load_frames(name, nc_path, pulse, cfg, log):
     msh = [Area(cst.ASP * 2, cst.ADP, np.deg2rad(az), 0, cst.AAP).calc_mask()
            for az in seg_azimuths]
 
-    print(f'[DBG] {name}: opening {nc_path}', flush=True)
-    t0 = time.time()
     try:
         source = NCInputSource(nc_path)
     except Exception as exc:
         log.error(f'{name}: cannot open {nc_path!r}: {exc}')
         return None
-    print(f'[DBG] {name}: file opened ({time.time()-t0:.1f}s)', flush=True)
 
     cbck = np.zeros((cst.NUM_AREA, cst.N_SHOTS, 2 * cst.ASP, 2 * cst.ASP), dtype=np.float32)
     last_bck = None
@@ -651,8 +655,6 @@ def _load_frames(name, nc_path, pulse, cfg, log):
 
     try:
         for t in range(cst.N_SHOTS):
-            if t % 64 == 0:
-                print(f'[DBG] {name}: frame {t}/{cst.N_SHOTS} ({time.time()-t0:.1f}s)', flush=True)
             back = source.get_bck()
             if back.step == 0.0:
                 log.warning(f'{name}: only {t} frames (need {cst.N_SHOTS}), skipping')
@@ -677,8 +679,6 @@ def _load_frames(name, nc_path, pulse, cfg, log):
             source.close()
         except Exception:
             pass
-    print(f'[DBG] {name}: frames loaded ({time.time()-t0:.1f}s)', flush=True)
-
     n_navi = max(n_navi, 1)
     om_max = np.pi / (60.0 / cst.RPM)
 
@@ -725,8 +725,6 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
     hdg_mean  = frames['hdg_mean']
     buoy_proc = frames['buoy_proc']
 
-    t0_cmp = time.time()
-    print(f'[DBG] {name}: compute start', flush=True)
     try:
         _, wdir = calc_wspd(last_bck)
 
@@ -737,13 +735,11 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         for i in range(cst.NUM_AREA):
             spec_3d_corr += calc_spec3d(cbck[i], cst.K_NUM)
         spec_3d_corr /= cst.NUM_AREA
-        print(f'[DBG] {name}: FFT done ({time.time()-t0_cmp:.1f}s)', flush=True)
 
         port_corr, _ = calc_port(spec_3d_corr)   # pre-correction, for debug portrait
 
         Ux, Uy        = calc_current_vector(spec_3d_corr, k_max, om_max, band=_SIGNAL_BAND,
                                             sog=sog_mean, cog_deg=cog_mean)
-        print(f'[DBG] {name}: current vector Ux={Ux:.3f} Uy={Uy:.3f} ({time.time()-t0_cmp:.1f}s)', flush=True)
 
         spec_3d_fixed = apply_doppler_3d_vec(spec_3d_corr, k_max, Ux, Uy, om_max)
 
@@ -755,11 +751,9 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         s_omega, m0, T_peak, T_mean     = compute_frequency_spectrum(signal_mtf, k_vals, omega_vals)
         s_om_th, peak_dir, mean_dir     = calc_spec2d(
             spec_3d_fixed, omega_vals, k_max, cst.N_DIRS, band=_SIGNAL_BAND)
-        print(f'[DBG] {name}: spectra done ({time.time()-t0_cmp:.1f}s)', flush=True)
 
         swh = 0.01 * (cst.SNR_A + cst.SNR_B * np.sqrt(snr_tot))
         sys = calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh)
-        print(f'[DBG] {name}: partitions done n_sys={sys["n_sys"]} ({time.time()-t0_cmp:.1f}s)', flush=True)
 
         cog_rad  = np.deg2rad(cog_mean)
         u_curr_x = float(Ux) - sog_mean * np.sin(cog_rad)   # East [m/s]
@@ -782,8 +776,8 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         u_ship_proj = float(Ux_ship_vis * np.cos(peak_dir_rad) + Uy_ship_vis * np.sin(peak_dir_rad))
 
         # Per-cell ω peak positions for scatter overlay on dispersion portrait
-        cent_k, cent_om = _dispersion_centroids(spec_3d_corr, k_max, om_max,
-                                                sog=sog_mean, cog_deg=cog_mean)
+        cent_k, cent_om, cent_w = _dispersion_centroids(spec_3d_corr, k_max, om_max,
+                                                       sog=sog_mean, cog_deg=cog_mean)
 
         wspd = 0.01 * float(cst.WSPD_A + cst.WSPD_B * wind_sig)
 
@@ -828,7 +822,6 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         return None
 
     if pics_dir is not None:
-        print(f'[DBG] {name}: saving pic', flush=True)
         try:
             _save_pic(
                 name, spec_1d, spec_2d, freq_out, ring, sys,
@@ -837,12 +830,11 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
                 pulse, last_navi, cst.ADP, cst.ASP, cst.N_DIRS, pics_dir,
                 port_corr=port_corr, k_vals=k_vals, omega_vals=omega_vals,
                 wdir_meta=wdir_meta, buoy_proc=buoy_proc,
-                cent_k=cent_k, cent_om=cent_om, u_ship_proj=u_ship_proj,
+                cent_k=cent_k, cent_om=cent_om, cent_w=cent_w, u_ship_proj=u_ship_proj,
                 sog_mean=sog_mean, cog_mean=cog_mean,
             )
         except Exception as exc:
             log.warning(f'{name}: pic save failed: {exc}', exc_info=True)
-        print(f'[DBG] {name}: pic done ({time.time()-t0_cmp:.1f}s total compute)', flush=True)
 
     ws = sys.get('w_s')
     row = {
@@ -916,8 +908,6 @@ def main():
         name = row['name'].split('/')[-1][:-3]
         path = args.base_path + row['name']
         pulse = row["pulse"]
-        print(f'\n[DBG] === [{int(i)+1}/{len(df)}] {name}  pulse={pulse} ===', flush=True)
-
         try:
             wind_meta = None
             for col in ('u_10', 'v_10'):
@@ -932,7 +922,6 @@ def main():
                                    wind_meta=wind_meta)
             if result is None:
                 log.warning(f'{name}: processing failed')
-                print(f'[DBG] {name}: FAILED (None result)', flush=True)
                 continue
 
             params, spec_1d, spec_2d = result

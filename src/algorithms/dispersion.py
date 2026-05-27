@@ -116,7 +116,9 @@ def calc_current_vector(spec_3d, k_max, om_max, band, sog=0.0, cog_deg=0.0, max_
                 continue
             eq_A.append([float(KX[i, j]), float(KY[i, j])])
             eq_b.append(float(om_arr[lo + pk]) - float(omega_ref[i, j]))
-            eq_w.append(peak_val)
+            # Divide by K_abs: outer rings have more cells (∝k), normalise to equal
+            # ring contribution so high-k cells don't dominate the regression.
+            eq_w.append(peak_val / float(K_abs[i, j]))
 
         if len(eq_A) < 10:
             return Ux_p, Uy_p
@@ -145,7 +147,7 @@ def calc_current_vector(spec_3d, k_max, om_max, band, sog=0.0, cog_deg=0.0, max_
             om_c = float(np.dot(sl, om_arr[lo:hi])) / w
             eq_A.append([float(KX[i, j]), float(KY[i, j])])
             eq_b.append(om_c - float(omega_ref[i, j]))
-            eq_w.append(w)
+            eq_w.append(w / float(K_abs[i, j]))
 
         if len(eq_A) < 10:
             return Ux_p, Uy_p
