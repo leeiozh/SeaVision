@@ -58,7 +58,7 @@ def calc_vco(port, om_max, k_max):
     return float(num / den) if den > 0 else 0.0
 
 
-def calc_current_vector(spec_3d, k_max, om_max, band, sog=0.0, cog_deg=0.0):
+def calc_current_vector(spec_3d, k_max, om_max, band, sog=0.0, cog_deg=0.0, max_current=2.55):
     """
     Two-pass estimation of (Ux, Uy) [m/s] from the 3-D spectrum.
     Equation: ω_peak(kx,ky) − √(g|k|) = kx·Ux + ky·Uy, solved by weighted least-squares.
@@ -69,8 +69,11 @@ def calc_current_vector(spec_3d, k_max, om_max, band, sog=0.0, cog_deg=0.0):
     Pass 2 — energy centroid in narrow window centred on Pass-1 result.
               Gives sub-bin precision around the already-well-centred peak.
 
+    After each pass the true ocean current (Ux−Ux_ship, Uy−Uy_ship) is clipped to
+    max_current [m/s] so physically implausible outliers cannot accumulate.
+
     Returns (Ux, Uy) [m/s] in geographic (East, North) frame.
-    (Ux, Uy) = apparent velocity = water_current − ship_velocity.
+    (Ux, Uy) = apparent velocity = water_current + ship_velocity.
     """
     n_om, n2, _ = spec_3d.shape
     k_num = n2 // 2
@@ -85,7 +88,10 @@ def calc_current_vector(spec_3d, k_max, om_max, band, sog=0.0, cog_deg=0.0):
 
     k_lo = k_max * 0.08
     k_hi = k_max * 0.65
-    i_vals, j_vals = np.where((K_abs > k_lo) & (K_abs < k_hi))
+    # Exclude cells where the unshifted dispersion curve exceeds the Nyquist ω.
+    # Those cells always produce a negative ω-residual (ω_ref is clipped to n_om-1)
+    # and systematically bias the velocity regression.
+    i_vals, j_vals = np.where((K_abs > k_lo) & (K_abs < k_hi) & (omega_ref < om_max))
 
     # Ship moves at (sog, cog_deg) → apparent velocity ≈ +ship_velocity in radar frame
     cog_rad = np.deg2rad(cog_deg)
@@ -150,12 +156,22 @@ def calc_current_vector(spec_3d, k_max, om_max, band, sog=0.0, cog_deg=0.0):
         res, _, _, _ = np.linalg.lstsq(A * wsq[:, None], b * wsq, rcond=None)
         return float(res[0]), float(res[1])
 
+    def _clip(Ux_r, Uy_r):
+        dx, dy = Ux_r - Ux_ship, Uy_r - Uy_ship
+        mag = float(np.hypot(dx, dy))
+        if mag > max_current:
+            f = max_current / mag
+            return float(Ux_ship + dx * f), float(Uy_ship + dy * f)
+        return Ux_r, Uy_r
+
     # Pass 1: argmax, wide window, centred on ship-shifted dispersion curve
     wide = max(band, n_om // 4)
     Ux, Uy = _argmax_pass(Ux_ship, Uy_ship, wide)
+    Ux, Uy = _clip(Ux, Uy)
 
     # Pass 2: centroid, narrow window, centred on Pass-1 result (sub-bin refinement)
     Ux, Uy = _centroid_pass(Ux, Uy, band)
+    Ux, Uy = _clip(Ux, Uy)
 
     return Ux, Uy
 

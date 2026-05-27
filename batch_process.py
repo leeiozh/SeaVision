@@ -18,6 +18,7 @@ Output:
 import argparse
 import gc
 import os
+import time
 import traceback
 import numpy as np
 import pandas as pd
@@ -37,7 +38,8 @@ from src.algorithms.dispersion import calc_current_vector
 from src.algorithms.partition import calc_wspd, calc_partitions
 from src.runtime.logger import setup_logger
 
-_SIGNAL_BAND = 10    # must match processor.py
+_SIGNAL_BAND  = 10    # must match processor.py
+_MAX_CURRENT  = 2.55  # physical clip for ocean current [m/s]
 
 # Quality thresholds — hardcoded, same as processor.py
 _SNR_QUALITY_MIN = 1.5
@@ -115,7 +117,7 @@ def _dispersion_centroids(spec_3d, k_max, om_max, sog=0.0, cog_deg=0.0):
     Ux_prior = sog * np.sin(cog_rad)
     Uy_prior = sog * np.cos(cog_rad)
 
-    win = max(10, n_om // 4)
+    win = max(10, n_om // 16)
     k_list, om_list = [], []
     for i, j in zip(i_vals, j_vals):
         om_ctr = float(omega_ref[i, j] + KX[i, j] * Ux_prior + KY[i, j] * Uy_prior)
@@ -630,11 +632,14 @@ def _load_frames(name, nc_path, pulse, cfg, log):
     msh = [Area(cst.ASP * 2, cst.ADP, np.deg2rad(az), 0, cst.AAP).calc_mask()
            for az in seg_azimuths]
 
+    print(f'[DBG] {name}: opening {nc_path}', flush=True)
+    t0 = time.time()
     try:
         source = NCInputSource(nc_path)
     except Exception as exc:
         log.error(f'{name}: cannot open {nc_path!r}: {exc}')
         return None
+    print(f'[DBG] {name}: file opened ({time.time()-t0:.1f}s)', flush=True)
 
     cbck = np.zeros((cst.NUM_AREA, cst.N_SHOTS, 2 * cst.ASP, 2 * cst.ASP), dtype=np.float32)
     last_bck = None
@@ -646,6 +651,8 @@ def _load_frames(name, nc_path, pulse, cfg, log):
 
     try:
         for t in range(cst.N_SHOTS):
+            if t % 64 == 0:
+                print(f'[DBG] {name}: frame {t}/{cst.N_SHOTS} ({time.time()-t0:.1f}s)', flush=True)
             back = source.get_bck()
             if back.step == 0.0:
                 log.warning(f'{name}: only {t} frames (need {cst.N_SHOTS}), skipping')
@@ -670,6 +677,7 @@ def _load_frames(name, nc_path, pulse, cfg, log):
             source.close()
         except Exception:
             pass
+    print(f'[DBG] {name}: frames loaded ({time.time()-t0:.1f}s)', flush=True)
 
     n_navi = max(n_navi, 1)
     om_max = np.pi / (60.0 / cst.RPM)
@@ -717,6 +725,8 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
     hdg_mean  = frames['hdg_mean']
     buoy_proc = frames['buoy_proc']
 
+    t0_cmp = time.time()
+    print(f'[DBG] {name}: compute start', flush=True)
     try:
         _, wdir = calc_wspd(last_bck)
 
@@ -727,11 +737,14 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         for i in range(cst.NUM_AREA):
             spec_3d_corr += calc_spec3d(cbck[i], cst.K_NUM)
         spec_3d_corr /= cst.NUM_AREA
+        print(f'[DBG] {name}: FFT done ({time.time()-t0_cmp:.1f}s)', flush=True)
 
         port_corr, _ = calc_port(spec_3d_corr)   # pre-correction, for debug portrait
 
         Ux, Uy        = calc_current_vector(spec_3d_corr, k_max, om_max, band=_SIGNAL_BAND,
                                             sog=sog_mean, cog_deg=cog_mean)
+        print(f'[DBG] {name}: current vector Ux={Ux:.3f} Uy={Uy:.3f} ({time.time()-t0_cmp:.1f}s)', flush=True)
+
         spec_3d_fixed = apply_doppler_3d_vec(spec_3d_corr, k_max, Ux, Uy, om_max)
 
         port_fixed, _ = calc_port(spec_3d_fixed)
@@ -742,14 +755,20 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         s_omega, m0, T_peak, T_mean     = compute_frequency_spectrum(signal_mtf, k_vals, omega_vals)
         s_om_th, peak_dir, mean_dir     = calc_spec2d(
             spec_3d_fixed, omega_vals, k_max, cst.N_DIRS, band=_SIGNAL_BAND)
+        print(f'[DBG] {name}: spectra done ({time.time()-t0_cmp:.1f}s)', flush=True)
 
         swh = 0.01 * (cst.SNR_A + cst.SNR_B * np.sqrt(snr_tot))
         sys = calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh)
+        print(f'[DBG] {name}: partitions done n_sys={sys["n_sys"]} ({time.time()-t0_cmp:.1f}s)', flush=True)
 
         cog_rad  = np.deg2rad(cog_mean)
         u_curr_x = float(Ux) - sog_mean * np.sin(cog_rad)   # East [m/s]
         u_curr_y = float(Uy) - sog_mean * np.cos(cog_rad)   # North [m/s]
         curr_speed = float(np.hypot(u_curr_x, u_curr_y))
+        if curr_speed > _MAX_CURRENT:
+            _f = _MAX_CURRENT / curr_speed
+            u_curr_x *= _f; u_curr_y *= _f
+            curr_speed = _MAX_CURRENT
         curr_dir   = float(np.degrees(np.arctan2(u_curr_x, u_curr_y)) % 360)  # compass
 
         # Apparent current projected onto dominant wave direction (for dispersion portrait)
@@ -806,6 +825,7 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         return None
 
     if pics_dir is not None:
+        print(f'[DBG] {name}: saving pic', flush=True)
         try:
             _save_pic(
                 name, spec_1d, spec_2d, freq_out, ring, sys,
@@ -819,6 +839,7 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
             )
         except Exception as exc:
             log.warning(f'{name}: pic save failed: {exc}', exc_info=True)
+        print(f'[DBG] {name}: pic done ({time.time()-t0_cmp:.1f}s total compute)', flush=True)
 
     ws = sys.get('w_s')
     row = {
@@ -892,6 +913,7 @@ def main():
         name = row['name'].split('/')[-1][:-3]
         path = args.base_path + row['name']
         pulse = row["pulse"]
+        print(f'\n[DBG] === [{int(i)+1}/{len(df)}] {name}  pulse={pulse} ===', flush=True)
 
         try:
             wind_meta = None
@@ -907,6 +929,7 @@ def main():
                                    wind_meta=wind_meta)
             if result is None:
                 log.warning(f'{name}: processing failed')
+                print(f'[DBG] {name}: FAILED (None result)', flush=True)
                 continue
 
             params, spec_1d, spec_2d = result

@@ -18,12 +18,13 @@ from src.algorithms.spectrum2d import (
     calc_spec2d,
 )
 
-_SIGNAL_BAND = 10  # ±bins around ω=√(gk) for signal extraction (shared by all steps)
+_SIGNAL_BAND  = 10    # ±bins around ω=√(gk) for signal extraction (shared by all steps)
+_MAX_CURRENT  = 2.55  # physical clip for ocean current [m/s]
 
 # Quality thresholds (hardcoded, not in config)
 _SNR_QUALITY_MIN = 1.5    # min snr_tot
-_WIND_SIG_MIN    = 10.0   # min std of backscatter in ADP±ASP ring
-_T_PEAK_MIN      = 6.0    # min peak period [s]
+_WIND_SIG_MIN    = 5.0   # min std of backscatter in ADP±ASP ring
+_T_PEAK_MIN      = 5.5    # min peak period [s]
 
 from src.algorithms.partition import calc_wspd, calc_partitions
 from src.io.structs import Wave, WaveOutput
@@ -346,6 +347,10 @@ class Processor:
             u_curr_x = float(Ux) - sog_mean * np.sin(cog_rad)   # East [m/s]
             u_curr_y = float(Uy) - sog_mean * np.cos(cog_rad)   # North [m/s]
             curr_speed = float(np.hypot(u_curr_x, u_curr_y))
+            if curr_speed > _MAX_CURRENT:
+                _f = _MAX_CURRENT / curr_speed
+                u_curr_x *= _f; u_curr_y *= _f
+                curr_speed = _MAX_CURRENT
             # Compass bearing: arctan2(East, North) = bearing from North, clockwise
             curr_dir = float(np.degrees(np.arctan2(u_curr_x, u_curr_y)) % 360)
 
