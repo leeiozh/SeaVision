@@ -340,10 +340,11 @@ class Processor:
                 _log.info(msg)
                 print(msg)
 
-            # True ocean current: Ux/Uy = apparent (water − ship). Add ship velocity back.
+            # (Ux, Uy) = apparent velocity in radar frame = v_current + v_ship.
+            # True ocean current: subtract ship velocity.
             cog_rad = np.deg2rad(cog_mean)
-            u_curr_x = float(Ux) + sog_mean * np.sin(cog_rad)   # East [m/s]
-            u_curr_y = float(Uy) + sog_mean * np.cos(cog_rad)   # North [m/s]
+            u_curr_x = float(Ux) - sog_mean * np.sin(cog_rad)   # East [m/s]
+            u_curr_y = float(Uy) - sog_mean * np.cos(cog_rad)   # North [m/s]
             curr_speed = float(np.hypot(u_curr_x, u_curr_y))
             # Compass bearing: arctan2(East, North) = bearing from North, clockwise
             curr_dir = float(np.degrees(np.arctan2(u_curr_x, u_curr_y)) % 360)

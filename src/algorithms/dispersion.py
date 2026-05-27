@@ -87,10 +87,10 @@ def calc_current_vector(spec_3d, k_max, om_max, band, sog=0.0, cog_deg=0.0):
     k_hi = k_max * 0.65
     i_vals, j_vals = np.where((K_abs > k_lo) & (K_abs < k_hi))
 
-    # Ship moves at (sog, cog_deg) → apparent velocity ≈ −ship_velocity as first guess
+    # Ship moves at (sog, cog_deg) → apparent velocity ≈ +ship_velocity in radar frame
     cog_rad = np.deg2rad(cog_deg)
-    Ux_ship = -sog * np.sin(cog_rad)
-    Uy_ship = -sog * np.cos(cog_rad)
+    Ux_ship = sog * np.sin(cog_rad)
+    Uy_ship = sog * np.cos(cog_rad)
 
     def _argmax_pass(Ux_p, Uy_p, win):
         """Peak position (argmax) within window — no centroid bias at window edges."""

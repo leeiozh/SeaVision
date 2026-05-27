@@ -637,7 +637,6 @@ def _load_frames(name, nc_path, pulse, cfg, log):
                 log.warning(f'{name}: only {t} frames (need {cst.N_SHOTS}), skipping')
                 return None
             navi = source.get_navi()
-            pulse = back.pulse
             last_bck = back.bck
             last_navi = navi
             sog_acc += float(navi.sog)
@@ -734,8 +733,8 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         sys = calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh)
 
         cog_rad  = np.deg2rad(cog_mean)
-        u_curr_x = float(Ux) + sog_mean * np.sin(cog_rad)   # East [m/s]
-        u_curr_y = float(Uy) + sog_mean * np.cos(cog_rad)   # North [m/s]
+        u_curr_x = float(Ux) - sog_mean * np.sin(cog_rad)   # East [m/s]
+        u_curr_y = float(Uy) - sog_mean * np.cos(cog_rad)   # North [m/s]
         curr_speed = float(np.hypot(u_curr_x, u_curr_y))
         curr_dir   = float(np.degrees(np.arctan2(u_curr_x, u_curr_y)) % 360)  # compass
 
