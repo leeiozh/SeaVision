@@ -771,12 +771,15 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
             curr_speed = _MAX_CURRENT
         curr_dir   = float(np.degrees(np.arctan2(u_curr_x, u_curr_y)) % 360)  # compass
 
-        # Apparent current projected onto dominant wave direction (for dispersion portrait)
+        # Apparent current projected onto dominant wave direction (for dispersion portrait).
+        # peak_dir is in math convention (0°=East, ccw): projection = Ux·cos + Uy·sin.
         peak_dir_rad = np.deg2rad(peak_dir)
-        u_proj = float(Ux * np.sin(peak_dir_rad) + Uy * np.cos(peak_dir_rad))
+        u_proj = float(Ux * np.cos(peak_dir_rad) + Uy * np.sin(peak_dir_rad))
 
-        # Ship-only projection: what u_proj would be if water current = 0
-        u_ship_proj = sog_mean * float(np.cos(peak_dir_rad - cog_rad))
+        # Ship-only projection: apparent speed if water current = 0
+        Ux_ship_vis = sog_mean * np.sin(cog_rad)   # East component of ship velocity
+        Uy_ship_vis = sog_mean * np.cos(cog_rad)   # North component
+        u_ship_proj = float(Ux_ship_vis * np.cos(peak_dir_rad) + Uy_ship_vis * np.sin(peak_dir_rad))
 
         # Per-cell ω peak positions for scatter overlay on dispersion portrait
         cent_k, cent_om = _dispersion_centroids(spec_3d_corr, k_max, om_max,
