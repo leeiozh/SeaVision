@@ -1,5 +1,7 @@
 __pycache__/
 batch_out/
 batch_out*/
+.claude/
+.idea/
 *.npy
 *.png
