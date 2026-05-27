@@ -61,6 +61,20 @@ _PARAMS_FIELDS = [
 ]
 
 
+_PULSE_TO_STR = {1: 'SP', 2: 'MP', 3: 'LP'}
+_PULSE_TO_INT = {'SP': 1, 'MP': 2, 'LP': 3}
+
+def _pulse_str(p):
+    if isinstance(p, str):
+        return p.strip().upper()
+    return _PULSE_TO_STR.get(int(p), str(p))
+
+def _pulse_int(p):
+    if isinstance(p, str):
+        return _PULSE_TO_INT.get(p.strip().upper(), 0)
+    return int(p)
+
+
 def _norm255(arr):
     mx = np.nanmax(arr)
     if mx > 0:
@@ -297,7 +311,7 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
     ncols = 3
     figw  = 20 if has_ewdm else 12
 
-    pulse_str = {1: 'SP', 2: 'MP', 3: 'LP'}.get(int(pulse), str(pulse))
+    pulse_str = _pulse_str(pulse)
 
     fig = Figure(figsize=(figw, 10))
     FigureCanvasAgg(fig)
@@ -809,7 +823,7 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
     ws = sys.get('w_s')
     row = {
         'name':     name,
-        'pulse':    int(pulse),
+        'pulse':    _pulse_str(pulse),
         'quality':  int(quality),
         'swh':      float(swh),
         't_p':      float(T_peak),
@@ -866,6 +880,8 @@ def main():
     os.makedirs(pics_dir,   exist_ok=True)
 
     df = pd.read_csv(args.csv)
+    if 'pulse' in df.columns:
+        df['pulse'] = df['pulse'].apply(_pulse_str)
     for field in _PARAMS_FIELDS:
         if field not in df.columns:
             df[field] = np.nan
