@@ -296,30 +296,24 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
     spec_2d  : shape (N_DIRS, N_FREQ), int [0..255]  — same as transmitted
     freq_out : shape (N_FREQ,), Hz
 
-    Layout (always 3 columns):
+    Layout (3 columns):
       [0,0] 1-D frequency spectrum (0..255)
       [0,1] Directional spectrum (polar, North-up clockwise)
-      [0,2] EWDM directional spectrum (buoy, if available)
-      [1,0] Backscatter ring (range × azimuth, transposed)
-      [1,1] Backscatter histogram (x clipped 50..200)
-      [1,2] ω-k dispersion portrait (pre-Doppler-correction)
+      [0,2] ω-k dispersion portrait (pre-Doppler-correction)
+      [1,:] Backscatter ring full-width (azimuth × range)
       [2,:] Parameter table
     """
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.gridspec import GridSpec
 
-    has_ewdm = (buoy_proc is not None and buoy_proc.get('ewdm') is not None)
-    ncols = 3
-    figw  = 20 if has_ewdm else 12
-
     pulse_str = _pulse_str(pulse)
 
-    fig = Figure(figsize=(figw, 10))
+    fig = Figure(figsize=(15, 10))
     FigureCanvasAgg(fig)
     fig.suptitle(f'{name}   [{pulse_str}]', fontsize=11, y=0.998)
 
-    gs = GridSpec(3, ncols, figure=fig, height_ratios=[3, 3, 2],
+    gs = GridSpec(3, 3, figure=fig, height_ratios=[3, 2.5, 2],
                   hspace=0.45, wspace=0.30,
                   left=0.06, right=0.97, top=0.96, bottom=0.03)
 
@@ -332,16 +326,6 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
         ax0.axvline(1.0 / T_peak, color='steelblue', ls='-', lw=1.5, label=f'Radar Tp={T_peak:.1f}s')
     if T_mean > 0:
         ax0.axvline(1.0 / T_mean, color='steelblue', ls='--', lw=1.2, label=f'Radar Tm={T_mean:.1f}s')
-
-    if buoy_proc is not None and buoy_proc.get('s_freq_255') is not None:
-        ax0.plot(buoy_proc['freq_hz'], buoy_proc['s_freq_255'],
-                 lw=1.2, color='tomato', alpha=0.85, label='Buoy (Welch)')
-        fp = buoy_proc.get('f_peak_hz')
-        fm = buoy_proc.get('f_mean_hz')
-        if fp and fp > 0:
-            ax0.axvline(fp, color='tomato', ls='-', lw=1.5, label=f'Buoy Tp={1/fp:.1f}s')
-        if fm and fm > 0:
-            ax0.axvline(fm, color='tomato', ls='--', lw=1.2, label=f'Buoy Tm={1/fm:.1f}s')
 
     ax0.set_xlim(0, freq_out[-1])
     ax0.set_ylim(0, 255)
@@ -427,95 +411,8 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
     _polar_dir_spec(ax1, spec_2d.astype(float), freq_out, sys_dict,
                     extra_lines=extra)
 
-    # ── Panel 0,2: EWDM directional spectrum ──────────────────────────────────
-    if has_ewdm:
-        ax_ewdm = fig.add_subplot(gs[0, 2], projection='polar')
-        ax_ewdm.set_theta_zero_location('N')
-        ax_ewdm.set_theta_direction(-1)
-        try:
-            ew      = buoy_proc['ewdm']
-            freq_ew = np.asarray(ew.frequency.values, dtype=float)
-            dirs_ew = np.asarray(ew.direction.values, dtype=float)
-            S_ft    = np.asarray(ew.directional_spectrum.values, dtype=float)
-            if S_ft.ndim == 3:
-                S_ft = S_ft.mean(axis=0)   # average over time blocks → (n_freq, n_dir)
-
-            dirs_360  = dirs_ew % 360
-            sort_idx  = np.argsort(dirs_360)
-            dirs_360  = dirs_360[sort_idx]
-            S_ft      = S_ft[:, sort_idx]  # (n_freq, n_dir_sorted)
-
-            f_mask_ew = freq_ew <= _F_DISPLAY
-            freq_d_ew = freq_ew[f_mask_ew]
-            S_disp    = S_ft[f_mask_ew, :]  # (n_f_disp, n_dir)
-
-            theta_ew        = np.deg2rad(dirs_360)
-            theta_closed_ew = np.append(theta_ew, theta_ew[0] + 2 * np.pi)
-            S_closed_ew     = np.hstack([S_disp, S_disp[:, :1]])
-            theta_g_ew, r_g_ew = np.meshgrid(theta_closed_ew, freq_d_ew)
-
-            vmax_ew = float(S_disp.max()) or 1.0
-            ax_ewdm.pcolormesh(theta_g_ew, r_g_ew, S_closed_ew,
-                               cmap='gnuplot2', vmin=0, vmax=vmax_ew, shading='auto')
-            # dp and dm from EWDM directional spectrum
-            dp_b = buoy_proc.get('dp_buoy')
-            dm_b = buoy_proc.get('dm_buoy')
-            if dp_b is not None:
-                ax_ewdm.plot([np.deg2rad(dp_b)] * 2, [0, _F_DISPLAY * 0.9],
-                             color='white', lw=1.8, ls='-', label=f'dp={dp_b:.0f}°')
-            if dm_b is not None:
-                ax_ewdm.plot([np.deg2rad(dm_b)] * 2, [0, _F_DISPLAY * 0.9],
-                             color='lightgray', lw=1.5, ls='--', label=f'dm={dm_b:.0f}°')
-            ax_ewdm.legend(fontsize=7, loc='lower right', bbox_to_anchor=(1.35, -0.05))
-            ax_ewdm.set_rlim(0, _F_DISPLAY)
-            ax_ewdm.grid(False)
-            ax_ewdm.set_title('Buoy EWDM', fontsize=9, pad=10)
-        except Exception as exc:
-            ax_ewdm.set_title(f'EWDM plot error:\n{exc}', pad=12)
-            print(f'[buoy] EWDM plot failed: {exc}')
-            traceback.print_exc()
-
-    # ── Panel 1,0: Backscatter ring — transposed, range×azimuth ───────────────
-    ax2 = fig.add_subplot(gs[1, 0])
-    r_lo = max(0, adp - asp)
-    r_hi = r_lo + ring.shape[1]
-    ax2.imshow(ring.T, vmin=80, vmax=140, cmap='binary', aspect='auto',
-               origin='upper', extent=[0, 360, r_hi, r_lo])
-    # Direction markers: detected wave systems + wind
-    _dir_lines = [
-        (peak_dir, 'red',    f'Sum {peak_dir:.0f}°'),
-        (wdir,     'white',  f'Wind {wdir:.0f}°'),
-    ]
-    for key, clr in [('w_s', 'cyan'), ('sw_1', 'lime'), ('sw_2', 'orange')]:
-        s = sys_dict.get(key)
-        if s:
-            _dir_lines.append((s['d_p'], clr, f'{key} {s["d_p"]:.0f}°'))
-    for d_deg, clr, lbl in _dir_lines:
-        ax2.axvline(d_deg % 360, color=clr, lw=1.4, ls='--', alpha=0.85, label=lbl)
-    ax2.legend(fontsize=6, loc='upper right', framealpha=0.5)
-    ax2.set_xlabel('Azimuth [°]')
-    ax2.set_ylabel('Range [px]')
-
-    # ── Panel 1,1: Histogram, clipped 50–200 ──────────────────────────────────
-    ax3 = fig.add_subplot(gs[1, 1])
-    vals   = ring.ravel().astype(float)
-    mean_v = float(np.mean(vals))
-    std_v  = float(np.std(vals))
-    ax3.hist(vals, bins=np.arange(49.5, 200.5, 1),
-             color='steelblue', edgecolor='none', alpha=0.85)
-    ax3.axvline(mean_v,           color='red',    lw=2.5, label=f'mean={mean_v:.1f}')
-    ax3.axvline(mean_v - std_v,   color='orange', lw=2.2, ls='--', label=f'±1σ ({std_v:.1f})')
-    ax3.axvline(mean_v + std_v,   color='orange', lw=2.2, ls='--')
-    ax3.axvline(mean_v - 3*std_v, color='lime',   lw=2.0, ls=':',  label='±3σ')
-    ax3.axvline(mean_v + 3*std_v, color='lime',   lw=2.0, ls=':')
-    ax3.set_xlim(50, 200)
-    ax3.set_xlabel('Backscatter intensity')
-    ax3.set_ylabel('Count')
-    ax3.set_title(f'std={std_v:.2f}')
-    ax3.legend(fontsize=8)
-
-    # ── Panel 1,2: ω-k dispersion portrait (pre-Doppler-correction) ─────────────
-    ax_disp = fig.add_subplot(gs[1, 2])
+    # ── Panel 0,2: ω-k dispersion portrait (pre-Doppler-correction) ─────────────
+    ax_disp = fig.add_subplot(gs[0, 2])
     if port_corr is not None and k_vals is not None and omega_vals is not None:
         _om_max = float(omega_vals[-1])
         _k_max  = float(k_vals[-1])
@@ -531,9 +428,11 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
         # Centroid scatter — where energy actually sits (Pass-1 wide window)
         if cent_k is not None and len(cent_k) > 0:
             if cent_w is not None and len(cent_w) == len(cent_k) and cent_w.max() > 0:
-                w_norm = cent_w / cent_w.max()
-                ax_disp.scatter(cent_k, cent_om, s=2 + 20 * w_norm, c=w_norm,
-                                cmap='hot', vmin=0, vmax=1, alpha=0.55,
+                # log-scale within [0,1] so faint cells are visible
+                w_log = np.log1p(cent_w)
+                w_norm = (w_log - w_log.min()) / (w_log.max() - w_log.min() + 1e-12)
+                ax_disp.scatter(cent_k, cent_om, s=2 + 18 * w_norm, c=w_norm,
+                                cmap='rainbow', vmin=0, vmax=1, alpha=0.6,
                                 linewidths=0, zorder=3, label='centroids')
             else:
                 ax_disp.scatter(cent_k, cent_om, s=3, c='red', alpha=0.35,
@@ -567,6 +466,26 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
     ax_disp.set_title('ω-k (pre-corr)', fontsize=8)
     ax_disp.set_xlabel('k [rad/m]', fontsize=7)
     ax_disp.set_ylabel('ω [rad/s]', fontsize=7)
+
+    # ── Panel 1,:: Backscatter ring — full width, range×azimuth ──────────────
+    ax2 = fig.add_subplot(gs[1, :])
+    r_lo = max(0, adp - asp)
+    r_hi = r_lo + ring.shape[1]
+    ax2.imshow(ring.T, vmin=80, vmax=140, cmap='binary', aspect='auto',
+               origin='upper', extent=[0, 360, r_hi, r_lo])
+    _dir_lines = [
+        (peak_dir, 'red',   f'Sum {peak_dir:.0f}°'),
+        (wdir,     'white', f'Wind {wdir:.0f}°'),
+    ]
+    for key, clr in [('w_s', 'cyan'), ('sw_1', 'lime'), ('sw_2', 'orange')]:
+        s = sys_dict.get(key)
+        if s:
+            _dir_lines.append((s['d_p'], clr, f'{key} {s["d_p"]:.0f}°'))
+    for d_deg, clr, lbl in _dir_lines:
+        ax2.axvline(d_deg % 360, color=clr, lw=1.4, ls='--', alpha=0.85, label=lbl)
+    ax2.legend(fontsize=7, loc='upper right', framealpha=0.5)
+    ax2.set_xlabel('Azimuth [°]')
+    ax2.set_ylabel('Range [px]')
 
     # ── Panel 2,: Parameter table ──────────────────────────────────────────────
     ax4 = fig.add_subplot(gs[2, :])
