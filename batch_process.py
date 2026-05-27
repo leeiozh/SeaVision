@@ -98,8 +98,8 @@ def _dispersion_centroids(spec_3d, k_max, om_max, sog=0.0, cog_deg=0.0):
     i_vals, j_vals = np.where((K_abs > k_lo) & (K_abs < k_hi))
 
     cog_rad = np.deg2rad(cog_deg)
-    Ux_prior = -sog * np.sin(cog_rad)
-    Uy_prior = -sog * np.cos(cog_rad)
+    Ux_prior = sog * np.sin(cog_rad)
+    Uy_prior = sog * np.cos(cog_rad)
 
     win = max(10, n_om // 4)
     k_list, om_list = [], []
@@ -295,11 +295,11 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
 
     has_ewdm = (buoy_proc is not None and buoy_proc.get('ewdm') is not None)
     ncols = 3
-    figw  = 16 if has_ewdm else 12
+    figw  = 20 if has_ewdm else 12
 
     pulse_str = {1: 'SP', 2: 'MP', 3: 'LP'}.get(int(pulse), str(pulse))
 
-    fig = Figure(figsize=(figw, 12))
+    fig = Figure(figsize=(figw, 10))
     FigureCanvasAgg(fig)
     fig.suptitle(f'{name}   [{pulse_str}]', fontsize=11, y=0.998)
 
@@ -605,7 +605,7 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
 
 # ── processing ────────────────────────────────────────────────────────────────
 
-def _load_frames(name, nc_path, cfg, log):
+def _load_frames(name, nc_path, pulse, cfg, log):
     """
     I/O phase: read N_SHOTS frames from NC file + buoy data if applicable.
     Returns dict with raw arrays or None on failure.
@@ -623,7 +623,6 @@ def _load_frames(name, nc_path, cfg, log):
         return None
 
     cbck = np.zeros((cst.NUM_AREA, cst.N_SHOTS, 2 * cst.ASP, 2 * cst.ASP), dtype=np.float32)
-    pulse = 1
     last_bck = None
     last_navi = None
     sog_acc = 0.0
@@ -745,7 +744,7 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         u_proj = float(Ux * np.sin(peak_dir_rad) + Uy * np.cos(peak_dir_rad))
 
         # Ship-only projection: what u_proj would be if water current = 0
-        u_ship_proj = -sog_mean * float(np.cos(peak_dir_rad - cog_rad))
+        u_ship_proj = sog_mean * float(np.cos(peak_dir_rad - cog_rad))
 
         # Per-cell ω peak positions for scatter overlay on dispersion portrait
         cent_k, cent_om = _dispersion_centroids(spec_3d_corr, k_max, om_max,
@@ -841,9 +840,9 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
     return row, spec_1d, spec_2d
 
 
-def _process_file(name, nc_path, cfg, spec_dir, pics_dir, log, wind_meta=None):
+def _process_file(name, nc_path, pulse, cfg, spec_dir, pics_dir, log, wind_meta=None):
     """Thin wrapper: load frames then compute. Used by single-process batch and legacy callers."""
-    frames = _load_frames(name, nc_path, cfg, log)
+    frames = _load_frames(name, nc_path, pulse, cfg, log)
     if frames is None:
         return None
     return _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta)
@@ -877,6 +876,7 @@ def main():
     for i, row in df.iterrows():
         name = row['name'].split('/')[-1][:-3]
         path = args.base_path + row['name']
+        pulse = row["pulse"]
 
         try:
             wind_meta = None
@@ -888,7 +888,7 @@ def main():
                 if pd.notna(u10) and pd.notna(v10):
                     wind_meta = {'u_10': float(u10), 'v_10': float(v10)}
 
-            result = _process_file(name, path, cfg, spec_dir, pics_dir, log,
+            result = _process_file(name, path, pulse, cfg, spec_dir, pics_dir, log,
                                    wind_meta=wind_meta)
             if result is None:
                 log.warning(f'{name}: processing failed')
