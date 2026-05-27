@@ -340,13 +340,13 @@ CHANGE_DIR_NUM_SHOTS=16  ← загружается в Constants, но Processor
 ```
 `SNR_A`, `SNR_B`, `WSPD_A`, `WSPD_B` — меняются при рекалибровке; **всегда смотреть в config.ini**. Коэффициенты WSPD в config.ini умноженные на 0.01 в коде дают м/с.
 
-Флаги качества (захардкожены, **не в config.ini**; значения в `processor.py` и `batch_process.py` **различаются**):
+Флаги качества (захардкожены, **не в config.ini**; одинаковы в `processor.py` и `batch_process.py`):
 
-| Параметр | `processor.py` | `batch_process.py` |
-|---|---|---|
-| `_SNR_QUALITY_MIN` | 1.5 | 1.5 |
-| `_WIND_SIG_MIN` | 10.0 | 5.0 |
-| `_T_PEAK_MIN` | 6.0 | 5.5 |
+| Параметр | Значение |
+|---|---|
+| `_SNR_QUALITY_MIN` | 1.5 |
+| `_WIND_SIG_MIN` | 5.0 |
+| `_T_PEAK_MIN` | 5.5 |
 
 - `quality = 1` если все три условия выполнены И `n_sys >= 1`
 - `ring_sig` = `std` интенсивности бэкскаттера в кольце `ADP±ASP` (≠ `sig` из `calc_wspd`, которая — среднее по всему изображению)

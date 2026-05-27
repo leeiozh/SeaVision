@@ -51,13 +51,13 @@ def calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh):
     """
     # Two systems are considered the same if they are closer than these thresholds
     # in BOTH direction AND period simultaneously.
-    MIN_DIR_SEP = 40.0    # degrees
-    MIN_PER_RATIO = 1.3  # T_large / T_small must exceed this to be distinct
+    MIN_DIR_SEP = 30.0    # degrees
+    MIN_PER_RATIO = 1.2  # T_large / T_small must exceed this to be distinct
 
     # Minimum fraction of total energy a peak must carry to be kept as a system.
     # The blanking window captures only ~50% of a system's energy, so set lower than
     # the naïve 1/N_sys estimate (was 0.30 — too restrictive for 3-system cases).
-    MIN_ENERGY_FRAC = 0.20
+    MIN_ENERGY_FRAC = 0.30
 
     num_area, n_om = s_om_th.shape
     dir_array = np.asarray(dir_array, dtype=float)
@@ -96,11 +96,11 @@ def calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh):
         if spec.max() <= 0:
             break
 
-        # Noise floor stop: peak must be > 5× median background
+        # Noise floor stop: peak must be > 3× median background
         pos = spec[spec > 0]
         if pos.size == 0:
             break
-        if spec.max() < np.median(pos) * 5.0:
+        if spec.max() < np.median(pos) * 3.0:
             break
 
         # Remaining energy fraction (before blanking this system)

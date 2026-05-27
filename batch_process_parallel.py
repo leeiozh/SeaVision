@@ -49,9 +49,9 @@ def _chunk_worker(args):
     q = queue.Queue(maxsize=1)
 
     def _reader():
-        for name, nc_path, pul, wind_meta in task_list:
+        for name, nc_path, pul, wind_meta, meta_dict in task_list:
             data = _load_frames(name, nc_path, pul, cfg, log)
-            q.put((name, wind_meta, data))
+            q.put((name, wind_meta, meta_dict, data))
         q.put(_SENTINEL)
 
     t = threading.Thread(target=_reader, daemon=True)
@@ -61,12 +61,12 @@ def _chunk_worker(args):
         item = q.get()
         if item is _SENTINEL:
             break
-        name, wind_meta, frames = item
+        name, wind_meta, meta_dict, frames = item
         if frames is not None:
             res = _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta)
         else:
             res = None
-        results.append((name, res))
+        results.append((name, meta_dict, res))
         gc.collect()
 
     t.join()
@@ -75,7 +75,7 @@ def _chunk_worker(args):
 
 # ── core loop ─────────────────────────────────────────────────────────────────
 
-def _run(file_pairs, cfg, spec_dir, pics_dir, log, n_workers, out_csv):
+def _run(file_pairs, cfg, spec_dir, pics_dir, log, n_workers, out_csv, all_fields):
     # Resume support: skip files already recorded in out_csv
     done = set()
     if os.path.exists(out_csv):
@@ -86,7 +86,7 @@ def _run(file_pairs, cfg, spec_dir, pics_dir, log, n_workers, out_csv):
         except Exception as exc:
             log.warning(f'Could not read existing {out_csv}: {exc}')
 
-    pending = [(n, p, pul, wm) for n, p, pul, wm in file_pairs if n not in done]
+    pending = [(n, p, pul, wm, md) for n, p, pul, wm, md in file_pairs if n not in done]
     if not pending:
         log.info('All files already processed')
         return
@@ -95,13 +95,14 @@ def _run(file_pairs, cfg, spec_dir, pics_dir, log, n_workers, out_csv):
     write_header = not os.path.exists(out_csv)
     n_done = 0
 
-    def _handle(name, res):
+    def _handle(name, meta_dict, res):
         nonlocal write_header, n_done
         if res is None:
             return
         row, _s1, _s2 = res
+        full_row = {**meta_dict, **row}   # computed overrides name/pulse
         try:
-            pd.DataFrame([row]).reindex(columns=_PARAMS_FIELDS).to_csv(
+            pd.DataFrame([full_row]).reindex(columns=all_fields).to_csv(
                 out_csv, mode='a', header=write_header, index=False, float_format='%.4f'
             )
             write_header = False
@@ -122,12 +123,12 @@ def _run(file_pairs, cfg, spec_dir, pics_dir, log, n_workers, out_csv):
         worker_args = [(chunk, cfg, spec_dir, pics_dir) for chunk in chunks]
         with Pool(len(chunks)) as pool:
             for chunk_results in pool.imap_unordered(_chunk_worker, worker_args):
-                for name, res in chunk_results:
-                    _handle(name, res)
+                for name, meta_dict, res in chunk_results:
+                    _handle(name, meta_dict, res)
     else:
         # Single process: still use read-ahead via _chunk_worker
-        for name, res in _chunk_worker((pending, cfg, spec_dir, pics_dir)):
-            _handle(name, res)
+        for name, meta_dict, res in _chunk_worker((pending, cfg, spec_dir, pics_dir)):
+            _handle(name, meta_dict, res)
 
     log.info(f'Done: {n_done} new rows → {out_csv}')
 
@@ -205,18 +206,24 @@ def main():
         log.info(f'Local mode: {len(indices)} files, {args.n_workers} workers')
 
     has_wind = {'u_10', 'v_10'}.issubset(df_all.columns)
+
+    # Full column list mirrors batch_process.main: source columns first, computed-only appended.
+    _computed_only = [c for c in _PARAMS_FIELDS if c not in df_all.columns]
+    all_fields = list(df_all.columns) + _computed_only
+
     file_pairs = []
     for idx in indices:
         row     = df_all.iloc[idx]
         name    = row['name'].split('/')[-1][:-3]
         nc_path = os.path.join(args.base_path, row['name'])
-        wind_meta = None
         pul = row.get("pulse")
+        wind_meta = None
         if has_wind and pd.notna(row.get('u_10')) and pd.notna(row.get('v_10')):
             wind_meta = {'u_10': float(row['u_10']), 'v_10': float(row['v_10'])}
-        file_pairs.append((name, nc_path, pul, wind_meta))
+        meta_dict = {c: (name if c == 'name' else row[c]) for c in df_all.columns}
+        file_pairs.append((name, nc_path, pul, wind_meta, meta_dict))
 
-    _run(file_pairs, cfg, spec_dir, pics_dir, log, args.n_workers, out_csv)
+    _run(file_pairs, cfg, spec_dir, pics_dir, log, args.n_workers, out_csv, all_fields)
 
 
 if __name__ == '__main__':

@@ -471,7 +471,7 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
     ax2 = fig.add_subplot(gs[1, :])
     r_lo = max(0, adp - asp)
     r_hi = r_lo + ring.shape[1]
-    ax2.imshow(ring.T, vmin=80, vmax=140, cmap='binary_r', aspect='auto',
+    ax2.imshow(ring.T, vmin=90, vmax=150, cmap='binary_r', aspect='auto',
                origin='upper', extent=[0, 360, r_hi, r_lo])
     _dir_lines = [
         (peak_dir, 'red',   f'Sum {peak_dir:.0f}°'),
@@ -482,7 +482,7 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
         if s:
             _dir_lines.append((s['d_p'], clr, f'{key} {s["d_p"]:.0f}°'))
     for d_deg, clr, lbl in _dir_lines:
-        ax2.axvline(d_deg % 360, color=clr, lw=1.4, ls='--', alpha=0.85, label=lbl)
+        ax2.axvline(d_deg % 360, color=clr, lw=2, ls='--', alpha=0.85, label=lbl)
     ax2.legend(fontsize=7, loc='upper right', framealpha=0.5)
     ax2.set_xlabel('Azimuth [°]')
     ax2.set_ylabel('Range [px]')
@@ -828,6 +828,11 @@ def main():
         except Exception as exc:
             log.warning(f'Could not read existing {params_path}: {exc}')
 
+    # Full column list: source CSV columns first (name → stem), then computed-only.
+    # This matches the historical params.csv layout and allows stable resume.
+    _computed_only = [c for c in _PARAMS_FIELDS if c not in df.columns]
+    all_fields = list(df.columns) + _computed_only
+
     write_header = not os.path.exists(params_path)
     n_done = 0
 
@@ -840,6 +845,8 @@ def main():
             continue
         path = args.base_path + row['name']
         pulse = row.get('pulse', 'MP')
+        # Carry all source columns through; replace 'name' with stem.
+        meta_dict = {c: (name if c == 'name' else row[c]) for c in df.columns}
         try:
             wind_meta = None
             if has_wind and pd.notna(row.get('u_10')) and pd.notna(row.get('v_10')):
@@ -852,8 +859,9 @@ def main():
                 continue
 
             params, spec_1d, spec_2d = result
+            full_params = {**meta_dict, **params}   # computed overrides name/pulse
             try:
-                pd.DataFrame([params]).reindex(columns=_PARAMS_FIELDS).to_csv(
+                pd.DataFrame([full_params]).reindex(columns=all_fields).to_csv(
                     params_path, mode='a', header=write_header, index=False,
                     float_format='%.4f'
                 )
