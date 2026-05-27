@@ -313,7 +313,7 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
     FigureCanvasAgg(fig)
     fig.suptitle(f'{name}   [{pulse_str}]', fontsize=11, y=0.998)
 
-    gs = GridSpec(3, 3, figure=fig, height_ratios=[3, 2.5, 2],
+    gs = GridSpec(3, 3, figure=fig, height_ratios=[2, 1, 1],
                   hspace=0.45, wspace=0.30,
                   left=0.06, right=0.97, top=0.96, bottom=0.03)
 
@@ -431,8 +431,8 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
                 # log-scale within [0,1] so faint cells are visible
                 w_log = np.log1p(cent_w)
                 w_norm = (w_log - w_log.min()) / (w_log.max() - w_log.min() + 1e-12)
-                ax_disp.scatter(cent_k, cent_om, s=2 + 18 * w_norm, c=w_norm,
-                                cmap='rainbow', vmin=0, vmax=1, alpha=0.6,
+                ax_disp.scatter(cent_k, cent_om, s=10 * w_norm, c=w_norm,
+                                cmap='rainbow', vmin=0, vmax=1, alpha=0.8,
                                 linewidths=0, zorder=3, label='centroids')
             else:
                 ax_disp.scatter(cent_k, cent_om, s=3, c='red', alpha=0.35,
@@ -442,14 +442,14 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
 
         # Cyan: full apparent velocity (algorithm result)
         _mask = (_om_shift >= 0) & (_om_shift <= _om_max)
-        ax_disp.plot(_k_arr[_mask], _om_shift[_mask], color='cyan', lw=1.3,
+        ax_disp.plot(_k_arr[_mask], _om_shift[_mask], color='red', lw=1.5,
                      label=f'u_proj={u_proj:+.2f}')
 
         # Yellow: ship-only curve (if water current = 0)
         _om_ship = _om_undist + _k_arr * u_ship_proj
         _mask_ship = (_om_ship >= 0) & (_om_ship <= _om_max)
         ax_disp.plot(_k_arr[_mask_ship], _om_ship[_mask_ship], color='red',
-                     lw=1.0, ls='--', label=f'ship_only={u_ship_proj:+.2f}')
+                     lw=1.5, ls='--', label=f'ship_only={u_ship_proj:+.2f}')
 
         ax_disp.set_xlim(0, _k_max)
         ax_disp.set_ylim(0, _om_max)
@@ -471,7 +471,7 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
     ax2 = fig.add_subplot(gs[1, :])
     r_lo = max(0, adp - asp)
     r_hi = r_lo + ring.shape[1]
-    ax2.imshow(ring.T, vmin=80, vmax=140, cmap='binary', aspect='auto',
+    ax2.imshow(ring.T, vmin=80, vmax=140, cmap='binary_r', aspect='auto',
                origin='upper', extent=[0, 360, r_hi, r_lo])
     _dir_lines = [
         (peak_dir, 'red',   f'Sum {peak_dir:.0f}°'),
