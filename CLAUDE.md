@@ -90,7 +90,7 @@ test/tester_receive.py      ← визуализация
 
 ## Ключевые алгоритмы
 
-### Методология обработки (актуальная, после рефакторинга мая 2026)
+### Методология обработки (актуальная, после рефакторинга мая–июня 2026)
 
 1. **Все NUM_AREA сегментов одновременно, без поворота** (`orient=0`).
    Каждый сегмент — квадрат `2·ASP × 2·ASP` пикселей, центр на расстоянии `ADP` px под своим азимутом.
@@ -98,34 +98,41 @@ test/tester_receive.py      ← визуализация
 
 2. **3D Welch FFT каждого сегмента** → `spec_3d_i (N_SHOTS//2, 2·K_NUM, 2·K_NUM)`, усреднение по NUM_AREA → `spec_3d_corr`.
 
-3. **Оценка вектора тока `(Ux, Uy)`** из `spec_3d_corr` через `calc_current_vector`:
-   для каждой валидной ячейки `(kx, ky)` — энергетический центроид ω, уравнение `ω̄ − √(g|k|) = kx·Ux + ky·Uy`, МНК по всем ячейкам.
-   `(Ux, Uy)` = кажущаяся скорость в радарном фрейме = ток_воды + скорость_судна (знак «плюс»: в системе отсчёта, привязанной к судну, Доплеровский сдвиг имеет знак `+k·v_ship`).
-   Двухпроходная оценка: Pass 1 — **argmax** в широком окне `max(_SIGNAL_BAND, n_om//4)`, инициализация от скорости судна `(Ux_prior = +SOG·sin(COG), Uy_prior = +SOG·cos(COG))` — окно центруется у реальной области энергии; Pass 2 — **центроид** в узком окне `_SIGNAL_BAND` вокруг результата Pass 1 (субпиксельная точность).
+3. **Pre-analysis для идентификации систем:**
+   - Предварительная Допплер-коррекция на скорость судна → `spec_3d_ship`
+   - `find_freq_peaks(s_omega_pre, omega_vals)` → до 3 пиков в частотном спектре (`_FPEAK_*` пороги)
+   - `find_system_dirs(s_om_th_pre, freq_peaks, ...)` → направление каждого пика → `systems_draft`
 
-4. **Векторная Доплеровская коррекция** `apply_doppler_3d_vec(spec_3d_corr, k_max, Ux, Uy, om_max)`:
+4. **Оценка вектора тока `(Ux, Uy)`:**
+   - Если `len(systems_draft) >= 2`: `calc_current_multiwave(spec_3d_ship, ..., systems_draft)` →
+     `(Ucx, Ucy)` остаточный ток; `Ux = Ucx + Ux_ship` (`_MULTI_*` пороги).
+     Системы нормируются по весу (одинаковый вклад независимо от энергии).
+     Возвращает `(None, None)` при плохой обусловленности → fallback.
+   - Иначе (или при fallback): двухпроходной argmax+centroid из `calc_current_vector`
+   для каждой валидной ячейки `(kx, ky)` — энергетический центроид ω, уравнение `ω̄ − √(g|k|) = kx·Ux + ky·Uy`, МНК по всем ячейкам.
+   `(Ux, Uy)` = кажущаяся скорость в радарном фрейме = ток_воды + скорость_судна.
+   Двухпроходная оценка: Pass 1 — **argmax** в широком окне, инициализация от скорости судна; Pass 2 — **центроид** в узком окне.
+
+5. **Векторная Доплеровская коррекция** `apply_doppler_3d_vec(spec_3d_corr, k_max, Ux, Uy, om_max)`:
    каждая ячейка `(kx, ky)` сдвигается на `Δω = kx·Ux + ky·Uy` — точно для любого числа волновых систем.
    → `spec_3d_fixed`.
 
-5. **ω-k портрет** `port_fixed` из `spec_3d_fixed` через `calc_port`.
+6. **ω-k портрет** `port_fixed` из `spec_3d_fixed` через `calc_port`.
 
-6. **Разделение сигнал/шум**: полоса `±_SIGNAL_BAND=10 бинов` вокруг `ω = √(g·k)` — единый параметр для всех шагов.
+7. **Разделение сигнал/шум**: полоса `±_SIGNAL_BAND=10 бинов` вокруг `ω = √(g·k)` — единый параметр для всех шагов.
 
-7. **MTF коррекция**: `k^{-1.2}`.
+8. **MTF коррекция**: `k^{-1.2}`.
 
-8. **1D ω-спектр** из MTF-взвешенного сигнала → `T_peak`, `T_mean`, `m0`, `snr_tot`.
+9. **1D ω-спектр** из MTF-взвешенного сигнала → `T_peak`, `T_mean`, `m0`, `snr_tot`.
 
-9. **Направленный спектр** `s_om_th (N_DIRS, N_SHOTS//2)` из `spec_3d_fixed` через `calc_spec2d` с тем же `band=_SIGNAL_BAND`.
-    **`peak_dir` — математическая конвенция**: 0° = Восток (+X сегмента), 90° = Север, 180° = Запад, 270° = Юг.
-    Проекция скорости на направление волны: `u_proj = Ux·cos(peak_dir) + Uy·sin(peak_dir)`.
-    **Не использовать компасную формулу** `Ux·sin + Uy·cos` — sin/cos перепутаны.
+10. **Направленный спектр** `s_om_th (N_DIRS, N_SHOTS//2)` из `spec_3d_fixed` через `calc_spec2d`.
+    **`peak_dir` — математическая конвенция**: 0° = Восток (+X сегмента), 90° = Север.
 
-10. **Разбиение на системы** `calc_partitions` — итеративный поиск пиков + гасение (радиус 15% по ω и dir).
-    Стоп-критерии: пик < 5× медиана фона, оставшаяся энергия < 20% суммарной.
-    Фильтр per-системы: `sys_energy / total_energy < MIN_ENERGY_FRAC (0.20)` → система отбрасывается.
-    Слияние дубликатов: два условия независимы (OR): пик пропускается если `dir_sep < MIN_DIR_SEP (40°)` ИЛИ `T_large / T_small < MIN_PER_RATIO (1.3)`.
-    Классификация: система в пределах ±45° от wdir (кратчайший T среди кандидатов) = ветровая; нет кандидата → w_s=None, все системы = зыби (по возрастанию T).
-    Сохранение энергии: raw fracs нормируются (`frac_i / Σfrac_j`) → `h_s_i = swh·√(frac_norm_i)`, гарантирует `Σ h_s_i² = swh²`.
+11. **Разбиение на системы** `calc_partitions` — итеративный поиск пиков + гасение (радиус `_PART_BLANK_FRAC=8%` по ω и dir).
+    Актуальные пороги (в `partition.py`): `_PART_MIN_DIR_SEP=20°`, `_PART_MIN_PER_RATIO=1.1`,
+    `_PART_MIN_ENERGY_FRAC=0.05`, `_PART_NOISE_SNR=3.0`, итерационный лимит = 5 (для обхода дублей).
+    Классификация: система в пределах ±45° от wdir = ветровая; нет кандидата → все = зыби.
+    Сохранение энергии: raw fracs нормируются → `h_s_i = swh·√(frac_norm_i)`, `Σ h_s_i² = swh²`.
 
 ### Ток (течение)
 Координатная система сегмента (`orient=0`): строки (axis 0) идут с Запада на Восток, столбцы (axis 1) — с Юга на Север. После FFT:
@@ -305,8 +312,8 @@ def close(self): ...                        # необязательный (вы
 | `src/processing/state.py` | `ProcessorState` — состояние между кадрами |
 | `src/processing/averaging.py` | `Averager` — кольцевой буфер, нормировка в [0,255] |
 | `src/algorithms/spectrum2d.py` | `calc_spec3d`, `calc_port`, `apply_doppler_3d_vec`, `separate_signal_noise`, `apply_mtf`, `compute_snr`, `compute_frequency_spectrum`, `calc_spec2d` |
-| `src/algorithms/dispersion.py` | `calc_current_vector` (МНК по 3D спектру), `calc_vco` (legacy), `dispersion_curve` |
-| `src/algorithms/partition.py` | `calc_wspd` (ветер), `calc_partitions` (разбиение на системы) |
+| `src/algorithms/dispersion.py` | `calc_current_vector` (МНК по 3D спектру), `calc_current_multiwave` (per-system МНК при ≥2 системах), `calc_vco` (legacy), `dispersion_curve` |
+| `src/algorithms/partition.py` | `calc_wspd` (ветер), `find_freq_peaks` (пики в 1D ω-спектре), `find_system_dirs` (направление каждого пика), `calc_partitions` (разбиение на системы) |
 | `src/algorithms/area.py` | `Area.calc_mask()` — вырезка сегмента с билинейной интерполяцией |
 | `src/config.py` | `load_config()` → `AppConfig(Constants, PipelineConfig, input, output)` |
 | `src/io/structs.py` | `Wave`, `WaveOutput`, `Output`, `ProcessResult`, `BackData`, `BackPack`, `Navi`; `parse_back_packet()`, `parse_navi_packet()` → поднимают `ProtocolError` при неверном формате пакета |
@@ -362,8 +369,9 @@ CHANGE_DIR_NUM_SHOTS=16  ← загружается в Constants, но Processor
 `Processor(config, pics)` — `pics=False` или строка `"false"` отключают отладку; строка с путём к директории (или `"."`) включают. В `main.py` передаётся из `cfg.output.get("pics", "false")`.
 
 `pics` в `[output]`: `false` — отключено; путь к директории (или `"."`) — PNG рядом с `main.py`:
-- `debug_portrait.png` — Doppler-скорректированный ω-k портрет + кривая `ω=√(gk)` + per-system residual curves; в заголовке `Ux`, `Uy`
-- `debug_spec2d.png` — направленный спектр `s_om_th` + маркеры систем (sum, w_s, sw_1, sw_2)
+- `debug_portrait.png` — Doppler-скорректированный ω-k портрет + кривая `ω=√(gk)` + per-system residual curves (`u_curr_proj` для каждой); scatter-точки от `sys_scatter` — цвет по номеру системы, размер ∝ log(интенсивность)
+- `debug_freq_spec.png` — 1D ω-спектр из ship-corrected pre-analysis; цветные вертикальные линии и полосы для каждой системы из `systems_draft`
+- `debug_spec2d.png` — направленный спектр `s_om_th` + маркеры финальных систем (sum, w_s, sw_1, sw_2) + кресты `+` для `systems_draft` (pre-analysis) с частотными полосами
 - `debug_segments.png` — сетка NUM_AREA строк × **3 столбца**: средний бэкскаттер | сырой ω-k портрет | kx-ky срез (сумма по ω > 0.1·om_max)
 
 ## Визуализация (tester_receive.py)

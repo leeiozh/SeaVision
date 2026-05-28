@@ -33,8 +33,9 @@ from src.algorithms.spectrum2d import (
     compute_snr, compute_frequency_spectrum,
     calc_spec2d,
 )
-from src.algorithms.dispersion import calc_current_vector
-from src.algorithms.partition import calc_wspd, calc_partitions
+from src.algorithms.dispersion import calc_current_vector, calc_current_multiwave
+from src.algorithms.partition import (calc_wspd, calc_partitions,
+                                       find_freq_peaks, find_system_dirs)
 from src.runtime.logger import setup_logger
 
 _SIGNAL_BAND  = 10    # must match processor.py
@@ -47,6 +48,9 @@ _T_PEAK_MIN      = 5.5
 
 _F_DISPLAY   = 0.20   # Hz — radial limit on polar spectrum display
 _BUOY_SKIP_SEC = 420  # skip first 7 min of buoy data (deployment)
+
+# Colours for identified wave systems (index = system rank by amplitude)
+_SYS_COLORS = ['cyan', 'lime', 'orange']
 
 
 _PARAMS_FIELDS = [
@@ -288,7 +292,8 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
               port_corr=None, k_vals=None, omega_vals=None,
               wdir_meta=None, buoy_proc=None,
               cent_k=None, cent_om=None, cent_w=None, u_ship_proj=0.0,
-              sog_mean=0.0, cog_mean=0.0):
+              sog_mean=0.0, cog_mean=0.0,
+              freq_peaks=None, systems_draft=None, sys_scatter=None):
     """
     Diagnostic figure.
 
@@ -327,11 +332,25 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
     if T_mean > 0:
         ax0.axvline(1.0 / T_mean, color='steelblue', ls='--', lw=1.2, label=f'Radar Tm={T_mean:.1f}s')
 
+    # Identified wave systems: shaded frequency bands + labelled peak lines
+    for s_idx, sys in enumerate(systems_draft or []):
+        clr = _SYS_COLORS[s_idx % len(_SYS_COLORS)]
+        f_lo  = sys['om_lo'] / (2 * np.pi)
+        f_hi  = sys['om_hi'] / (2 * np.pi)
+        f_pk  = sys['om']    / (2 * np.pi)
+        T_s   = 1.0 / f_pk if f_pk > 0 else 0.0
+        ax0.axvspan(f_lo, f_hi, alpha=0.13, color=clr, zorder=1)
+        ax0.axvline(f_pk, color=clr, lw=1.5, zorder=4,
+                    label=f'sys{s_idx} T={T_s:.1f}s {sys["dir_deg"]:.0f}°')
+        ax0.text(f_pk, 245, f'T={T_s:.1f}s', color=clr, fontsize=7,
+                 ha='center', va='top',
+                 bbox=dict(boxstyle='round,pad=0.1', fc='#111111', alpha=0.6))
+
     ax0.set_xlim(0, freq_out[-1])
     ax0.set_ylim(0, 255)
     ax0.set_xlabel('f [Hz]')
     ax0.set_ylabel('S(f)  [0–255]')
-    ax0.legend(fontsize=8)
+    ax0.legend(fontsize=7)
 
     # ── helper: polar directional spectrum ────────────────────────────────────
     def _polar_dir_spec(ax, spec_nd, freq_hz, sys_d, extra_lines=None, title=''):
@@ -389,6 +408,17 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
                 ax.plot([t_rad, t_rad], [0, r_val], color=clr, lw=2, label=lbl)
                 ax.plot(t_rad, r_val, '^', color=clr, ms=7)
 
+        # Pre-analysis systems_draft: cross markers at (direction, frequency)
+        # dir_deg in math convention → pass directly (same as existing d_p handling)
+        for s_idx, sys in enumerate(systems_draft or []):
+            clr  = _SYS_COLORS[s_idx % len(_SYS_COLORS)]
+            t_s  = np.deg2rad(sys['dir_deg'])
+            f_s  = sys['om'] / (2 * np.pi)
+            T_s  = 1.0 / f_s if f_s > 0 else 0.0
+            if 0 < f_s <= _F_DISPLAY:
+                ax.plot(t_s, f_s, '+', color=clr, ms=14, mew=2.5, zorder=8,
+                        label=f"draft{s_idx} T={T_s:.1f}s {sys['dir_deg']:.0f}°")
+
         ax.set_rlim(0, r_max)
         ax.grid(False)
         ax.legend(fontsize=7, loc='lower right', bbox_to_anchor=(1.35, -0.05))
@@ -425,18 +455,43 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
                        vmin=0, vmax=max(float(port_corr.max()), 1e-9),
                        interpolation='none')
 
-        # Centroid scatter — where energy actually sits (Pass-1 wide window)
-        if cent_k is not None and len(cent_k) > 0:
-            if cent_w is not None and len(cent_w) == len(cent_k) and cent_w.max() > 0:
-                # log-scale within [0,1] so faint cells are visible
-                w_log = np.log1p(cent_w)
+        # Centroid scatter — per-system coloured or monochrome fallback
+        if sys_scatter and any(len(k) > 0 for k, _, _ in sys_scatter):
+            # Coloured scatter: one colour per pre-analysis system
+            rng = np.random.default_rng(42)
+            MAX_PTS = 150
+            for s_idx, (k_pts, om_pts, w_pts) in enumerate(sys_scatter):
+                if len(k_pts) == 0:
+                    continue
+                clr = _SYS_COLORS[s_idx % len(_SYS_COLORS)]
+                n = len(k_pts)
+                if n > MAX_PTS:
+                    idx = rng.choice(n, MAX_PTS, replace=False)
+                    k_pts, om_pts, w_pts = k_pts[idx], om_pts[idx], w_pts[idx]
+                sz = (10 + 60 * np.log1p(w_pts / (w_pts.max() + 1e-30) * 1e3)
+                      / np.log1p(1e3)) if w_pts.max() > 0 else np.full(len(k_pts), 15.0)
+                sys_lbl = (f'sys{s_idx} T={2*np.pi/systems_draft[s_idx]["om"]:.1f}s'
+                           if systems_draft and s_idx < len(systems_draft) else f'sys{s_idx}')
+                ax_disp.scatter(k_pts, om_pts, c=clr, s=sz, alpha=0.6,
+                                linewidths=0, zorder=4, label=sys_lbl)
+        elif cent_k is not None and len(cent_k) > 0:
+            # Fallback: colour by k-range membership when multiwave scatter not available
+            colors_pt = ['gray'] * len(cent_k)
+            for s_idx, sys in enumerate(systems_draft or []):
+                k_lo = sys['om_lo'] ** 2 / 9.81
+                k_hi = sys['om_hi'] ** 2 / 9.81
+                clr  = _SYS_COLORS[s_idx % len(_SYS_COLORS)]
+                for pi, k in enumerate(cent_k):
+                    if k_lo <= k <= k_hi:
+                        colors_pt[pi] = clr
+            if cent_w is not None and cent_w.max() > 0:
+                w_log  = np.log1p(cent_w)
                 w_norm = (w_log - w_log.min()) / (w_log.max() - w_log.min() + 1e-12)
-                ax_disp.scatter(cent_k, cent_om, s=10 * w_norm, c=w_norm,
-                                cmap='rainbow', vmin=0, vmax=1, alpha=0.8,
-                                linewidths=0, zorder=3, label='centroids')
+                ax_disp.scatter(cent_k, cent_om, s=10 * w_norm + 2, c=colors_pt,
+                                alpha=0.75, linewidths=0, zorder=3, label='centroids')
             else:
-                ax_disp.scatter(cent_k, cent_om, s=3, c='red', alpha=0.35,
-                                linewidths=0, zorder=3, label='centroids')
+                ax_disp.scatter(cent_k, cent_om, s=3, c=colors_pt,
+                                alpha=0.5, linewidths=0, zorder=3, label='centroids')
 
         ax_disp.plot(_k_arr, _om_undist, 'w--', lw=1.0, label='ω=√(gk)')
 
@@ -657,8 +712,39 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
 
         port_corr, _ = calc_port(spec_3d_corr)   # pre-correction, for debug portrait
 
-        Ux, Uy        = calc_current_vector(spec_3d_corr, k_max, om_max, band=_SIGNAL_BAND,
-                                            sog=sog_mean, cog_deg=cog_mean)
+        # ── Phase 1: ship-speed correction for pre-analysis ───────────────────
+        cog_rad  = np.deg2rad(cog_mean)
+        Ux_ship  = sog_mean * np.sin(cog_rad)
+        Uy_ship  = sog_mean * np.cos(cog_rad)
+
+        spec_3d_ship   = apply_doppler_3d_vec(spec_3d_corr, k_max, Ux_ship, Uy_ship, om_max)
+        port_pre, _    = calc_port(spec_3d_ship)
+        signal_pre, _  = separate_signal_noise(port_pre, k_vals, om_max, band=_SIGNAL_BAND)
+        sig_mtf_pre    = apply_mtf(signal_pre, k_vals, exp=1.2)
+        s_omega_pre, _, _, _ = compute_frequency_spectrum(sig_mtf_pre, k_vals, omega_vals)
+
+        freq_peaks = find_freq_peaks(s_omega_pre, omega_vals)
+
+        s_om_th_pre, _, _ = calc_spec2d(spec_3d_ship, omega_vals, k_max,
+                                         cst.N_DIRS, band=_SIGNAL_BAND)
+        systems_draft = find_system_dirs(s_om_th_pre, freq_peaks, omega_vals, dir_array)
+
+        # ── Phase 2: current estimation ───────────────────────────────────────
+        Ux, Uy      = None, None
+        sys_scatter = []
+        if len(systems_draft) >= 2:
+            Ucx, Ucy, sys_scatter = calc_current_multiwave(
+                spec_3d_ship, k_max, om_max, systems_draft, _SIGNAL_BAND)
+            if Ucx is not None:
+                Ux = Ucx + Ux_ship
+                Uy = Ucy + Uy_ship
+                log.debug(f'{name}: multi-wave current Ux={Ux:+.2f} Uy={Uy:+.2f} '
+                          f'({len(systems_draft)} systems)')
+
+        if Ux is None:
+            Ux, Uy = calc_current_vector(spec_3d_corr, k_max, om_max, band=_SIGNAL_BAND,
+                                         sog=sog_mean, cog_deg=cog_mean)
+            sys_scatter = [(np.array([]), np.array([]), np.array([])) for _ in systems_draft]
 
         spec_3d_fixed = apply_doppler_3d_vec(spec_3d_corr, k_max, Ux, Uy, om_max)
 
@@ -694,9 +780,9 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         Uy_ship_vis = sog_mean * np.cos(cog_rad)   # North component
         u_ship_proj = float(Ux_ship_vis * np.cos(peak_dir_rad) + Uy_ship_vis * np.sin(peak_dir_rad))
 
-        # Per-cell ω peak positions for scatter overlay on dispersion portrait
+        # Per-cell ω peak positions for scatter overlay (fallback when multiwave not used)
         cent_k, cent_om, cent_w = _dispersion_centroids(spec_3d_corr, k_max, om_max,
-                                                       sog=sog_mean, cog_deg=cog_mean)
+                                                        sog=sog_mean, cog_deg=cog_mean)
 
         wspd = 0.01 * float(cst.WSPD_A + cst.WSPD_B * wind_sig)
 
@@ -751,6 +837,7 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
                 wdir_meta=wdir_meta, buoy_proc=buoy_proc,
                 cent_k=cent_k, cent_om=cent_om, cent_w=cent_w, u_ship_proj=u_ship_proj,
                 sog_mean=sog_mean, cog_mean=cog_mean,
+                freq_peaks=freq_peaks, systems_draft=systems_draft, sys_scatter=sys_scatter,
             )
         except Exception as exc:
             log.warning(f'{name}: pic save failed: {exc}', exc_info=True)

@@ -1,5 +1,14 @@
 import numpy as np
 
+# ── Thresholds for calc_current_multiwave ────────────────────────────────────
+_MULTI_DIR_HALF_DEG = 45.0   # half-width of directional cone per system [deg]
+_MULTI_MIN_CELLS    = 5      # min spectral cells per system to enter regression
+_MULTI_MIN_SV_RATIO = 0.05   # min σ_min/σ_max for 2×2 solve (ill-cond. guard)
+_MULTI_MAX_CURRENT  = 2.55   # physical clip for residual current [m/s]
+_MULTI_K_MIN_REL    = 0.08   # min k / k_max for a cell to be used in regression;
+                              # very long swell (k → 0) gives Δω = k·U → 0 and
+                              # contributes only noise to the regression
+
 
 def calc_vco(port, om_max, k_max):
     """
@@ -176,6 +185,122 @@ def calc_current_vector(spec_3d, k_max, om_max, band, sog=0.0, cog_deg=0.0, max_
     Ux, Uy = _clip(Ux, Uy)
 
     return Ux, Uy
+
+
+def calc_current_multiwave(spec_3d_ship, k_max, om_max, systems_draft, band):
+    """
+    Per-system Doppler estimation from ship-speed-corrected 3-D spectrum.
+
+    spec_3d_ship  — spec_3d after Doppler-correcting for ship velocity only.
+                    Residual Doppler = true ocean current.
+    systems_draft — list of dicts from find_system_dirs:
+                    {"om", "om_lo", "om_hi", "dir_deg", ...}
+    band          — ±band bins used throughout the pipeline.
+
+    For each system a directional cone [dir_deg ± _MULTI_DIR_HALF_DEG] and
+    frequency band [om_lo, om_hi] define a spectral mask.  Within that mask,
+    the energy-centroid ω gives  kx·Ucx + ky·Ucy = Δω  per cell.
+
+    Systems contribute equally to the joint regression (per-system weight
+    normalisation), so a high-energy swell does not drown a low-energy wind-sea.
+
+    Returns (Ucx, Ucy) [m/s] — true ocean current, East/North frame.
+    Returns (None, None) if the problem is ill-conditioned (too few cells or
+    singular-value ratio too small); caller falls back to calc_current_vector.
+
+    Also returns sys_scatter: list of (k_arr, om_arr, w_arr) per system —
+    centroid positions used for debug visualisation.
+    """
+    n_om, n2, _ = spec_3d_ship.shape
+    k_num = n2 // 2
+
+    kx = np.arange(-k_num, k_num, dtype=float) / k_num * k_max   # [rad/m]
+    ky = np.arange(-k_num, k_num, dtype=float) / k_num * k_max
+    KX, KY   = np.meshgrid(kx, ky, indexing='ij')
+    K_abs    = np.sqrt(KX ** 2 + KY ** 2)       # already physical [rad/m]
+    k_phys   = K_abs                             # alias for clarity
+    phi      = np.arctan2(KY, KX)               # direction, math convention
+
+    om_arr    = np.linspace(0, om_max, n_om)
+    omega_ref = np.sqrt(9.81 * k_phys)
+
+    dir_half = np.deg2rad(_MULTI_DIR_HALF_DEG)
+
+    all_A, all_b, all_w = [], [], []
+    sys_scatter = []                             # [(k_pts, om_pts, w_pts), ...]
+
+    for sys in systems_draft:
+        k_lo_s  = sys["om_lo"] ** 2 / 9.81
+        k_hi_s  = sys["om_hi"] ** 2 / 9.81
+        theta_s = np.deg2rad(sys["dir_deg"])
+
+        dangle = np.abs(phi - theta_s)
+        dangle = np.minimum(dangle, 2 * np.pi - dangle)
+
+        k_min_useful = k_max * _MULTI_K_MIN_REL
+        mask = (
+            (k_phys    > max(k_lo_s, k_min_useful)) & (k_phys < k_hi_s) &
+            (dangle    < dir_half) &
+            (omega_ref < om_max * 0.92)          # avoid Nyquist aliasing
+        )
+        i_v, j_v = np.where(mask)
+        if len(i_v) < _MULTI_MIN_CELLS:
+            sys_scatter.append((np.array([]), np.array([]), np.array([])))
+            continue
+
+        sys_A, sys_b, sys_w = [], [], []
+        k_pts, om_pts, w_pts = [], [], []
+
+        for i, j in zip(i_v, j_v):
+            om_ref_ij = float(omega_ref[i, j])
+            ci = int(round(om_ref_ij / om_max * (n_om - 1)))
+            ci = max(1, min(n_om - 1, ci))
+            lo = max(1,    ci - band)
+            hi = min(n_om, ci + band + 1)
+            if hi <= lo:
+                continue
+            sl = spec_3d_ship[lo:hi, i, j].astype(np.float64)
+            w  = sl.sum()
+            if w <= 0:
+                continue
+            om_c = float(np.dot(sl, om_arr[lo:hi])) / w
+            sys_A.append([float(KX[i, j]), float(KY[i, j])])
+            sys_b.append(om_c - om_ref_ij)
+            sys_w.append(w / max(float(K_abs[i, j]), 1e-6))
+            k_pts.append(float(k_phys[i, j]))
+            om_pts.append(om_c)
+            w_pts.append(w)
+
+        if len(sys_A) < _MULTI_MIN_CELLS:
+            sys_scatter.append((np.array([]), np.array([]), np.array([])))
+            continue
+
+        # Normalise per-system: each system contributes equally regardless of energy
+        w_arr = np.array(sys_w);  w_arr /= w_arr.sum()
+
+        all_A.extend(sys_A);  all_b.extend(sys_b);  all_w.extend(w_arr.tolist())
+        sys_scatter.append((np.array(k_pts), np.array(om_pts), np.array(w_pts)))
+
+    if len(all_A) < 4:
+        return None, None, sys_scatter
+
+    A   = np.array(all_A)
+    b   = np.array(all_b)
+    wsq = np.sqrt(np.array(all_w))
+
+    _, sv, _ = np.linalg.svd(A * wsq[:, None], full_matrices=False)
+    if sv[-1] < _MULTI_MIN_SV_RATIO * sv[0]:
+        return None, None, sys_scatter
+
+    res, _, _, _ = np.linalg.lstsq(A * wsq[:, None], b * wsq, rcond=None)
+    Ucx, Ucy = float(res[0]), float(res[1])
+
+    mag = float(np.hypot(Ucx, Ucy))
+    if mag > _MULTI_MAX_CURRENT:
+        f = _MULTI_MAX_CURRENT / mag
+        Ucx, Ucy = Ucx * f, Ucy * f
+
+    return Ucx, Ucy, sys_scatter
 
 
 def dispersion_curve(k, vco, depth=None):
