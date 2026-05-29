@@ -157,7 +157,7 @@ def _merge(out_dir):
 
 def main():
     parser = argparse.ArgumentParser(description='Parallel SeaVision batch processing')
-    parser.add_argument('--csv',        default='META_upd.csv')
+    parser.add_argument('--csv',        default='META_with_era5.csv')
     parser.add_argument('--base-path',  default='/storage/thalassa/DATA/RADAR/')
     parser.add_argument('--out',        default='batch_out')
     parser.add_argument('--config',     default='config.ini')
