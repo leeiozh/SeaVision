@@ -22,8 +22,8 @@ _SIGNAL_BAND  = 10    # ±bins around ω=√(gk) for signal extraction (shared b
 _MAX_CURRENT  = 2.55  # physical clip for ocean current [m/s]
 
 # Quality thresholds (hardcoded, not in config)
-_SNR_QUALITY_MIN = 1.5
-_WIND_SIG_MIN    = 5.0
+_SNR_QUALITY_MIN = 5.0
+_WIND_SIG_MIN    = 5.5
 _T_PEAK_MIN      = 5.5
 
 from src.algorithms.partition import calc_wspd, calc_partitions, find_freq_peaks, find_system_dirs

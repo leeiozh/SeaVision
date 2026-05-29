@@ -3,7 +3,7 @@ from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter, gaussian_filter1d
 
 # ── Thresholds for calc_partitions ───────────────────────────────────────────
-_PART_MIN_DIR_SEP     = 20.0   # min angular separation [deg] for two distinct systems
+_PART_MIN_DIR_SEP     = 25.0   # min angular separation [deg] for two distinct systems
                                 # (was 30°; with N_DIRS=36 → 10°/bin, two bins = 20°
                                 # is already the grid resolution, so 20° is the minimum
                                 # meaningful separation)
@@ -190,7 +190,9 @@ def calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh):
 
     systems = []
 
-    for _ in range(5):   # up to 3 accepted; extras consumed by near-duplicate blanking
+    for _ in range(5):
+        if len(systems) >= 3:
+            break
         if spec.max() <= 0:
             break
         pos = spec[spec > 0]

@@ -201,6 +201,13 @@ def calc_current_multiwave(spec_3d_ship, k_max, om_max, systems_draft, band):
     frequency band [om_lo, om_hi] define a spectral mask.  Within that mask,
     the energy-centroid ω gives  kx·Ucx + ky·Ucy = Δω  per cell.
 
+    Two-pass estimation (mirrors calc_current_vector):
+      Pass 1 — argmax in wide window centred on ω_ref = √(gk).
+               Captures large currents that would fall outside the narrow band.
+               Wide window = max(band, n_om//4) bins.
+      Pass 2 — energy centroid in narrow window (±band bins) centred on
+               ω_ref + KX·Ucx0 + KY·Ucy0 from pass 1.  Sub-bin precision.
+
     Systems contribute equally to the joint regression (per-system weight
     normalisation), so a high-energy swell does not drown a low-energy wind-sea.
 
@@ -209,7 +216,7 @@ def calc_current_multiwave(spec_3d_ship, k_max, om_max, systems_draft, band):
     singular-value ratio too small); caller falls back to calc_current_vector.
 
     Also returns sys_scatter: list of (k_arr, om_arr, w_arr) per system —
-    centroid positions used for debug visualisation.
+    centroid positions from pass 2, used for debug visualisation.
     """
     n_om, n2, _ = spec_3d_ship.shape
     k_num = n2 // 2
@@ -217,88 +224,126 @@ def calc_current_multiwave(spec_3d_ship, k_max, om_max, systems_draft, band):
     kx = np.arange(-k_num, k_num, dtype=float) / k_num * k_max   # [rad/m]
     ky = np.arange(-k_num, k_num, dtype=float) / k_num * k_max
     KX, KY   = np.meshgrid(kx, ky, indexing='ij')
-    K_abs    = np.sqrt(KX ** 2 + KY ** 2)       # already physical [rad/m]
-    k_phys   = K_abs                             # alias for clarity
-    phi      = np.arctan2(KY, KX)               # direction, math convention
+    K_abs    = np.sqrt(KX ** 2 + KY ** 2)
+    k_phys   = K_abs
+    phi      = np.arctan2(KY, KX)
 
     om_arr    = np.linspace(0, om_max, n_om)
     omega_ref = np.sqrt(9.81 * k_phys)
 
     dir_half = np.deg2rad(_MULTI_DIR_HALF_DEG)
+    wide     = max(band, n_om // 4)   # same wide window as calc_current_vector pass 1
 
-    all_A, all_b, all_w = [], [], []
-    sys_scatter = []                             # [(k_pts, om_pts, w_pts), ...]
-
+    # Precompute per-system spatial masks — reused by both passes
+    _empty = (np.array([]), np.array([]), np.array([]))
+    sys_masks = []
     for sys in systems_draft:
-        k_lo_s  = sys["om_lo"] ** 2 / 9.81
-        k_hi_s  = sys["om_hi"] ** 2 / 9.81
-        theta_s = np.deg2rad(sys["dir_deg"])
-
-        dangle = np.abs(phi - theta_s)
-        dangle = np.minimum(dangle, 2 * np.pi - dangle)
-
+        k_lo_s       = sys["om_lo"] ** 2 / 9.81
+        k_hi_s       = sys["om_hi"] ** 2 / 9.81
+        theta_s      = np.deg2rad(sys["dir_deg"])
+        dangle       = np.abs(phi - theta_s)
+        dangle       = np.minimum(dangle, 2 * np.pi - dangle)
         k_min_useful = k_max * _MULTI_K_MIN_REL
         mask = (
-            (k_phys    > max(k_lo_s, k_min_useful)) & (k_phys < k_hi_s) &
-            (dangle    < dir_half) &
-            (omega_ref < om_max * 0.92)          # avoid Nyquist aliasing
+            (k_phys > max(k_lo_s, k_min_useful)) & (k_phys < k_hi_s) &
+            (dangle < dir_half) &
+            (omega_ref < om_max * 0.92)
         )
-        i_v, j_v = np.where(mask)
-        if len(i_v) < _MULTI_MIN_CELLS:
-            sys_scatter.append((np.array([]), np.array([]), np.array([])))
-            continue
+        sys_masks.append(np.where(mask))
 
-        sys_A, sys_b, sys_w = [], [], []
-        k_pts, om_pts, w_pts = [], [], []
+    def _run_pass(Ucx_p, Ucy_p, win, use_argmax):
+        """Collect WLS equations for all systems.
 
-        for i, j in zip(i_v, j_v):
-            om_ref_ij = float(omega_ref[i, j])
-            ci = int(round(om_ref_ij / om_max * (n_om - 1)))
-            ci = max(1, min(n_om - 1, ci))
-            lo = max(1,    ci - band)
-            hi = min(n_om, ci + band + 1)
-            if hi <= lo:
+        Ucx_p, Ucy_p — current prior used to centre each cell's window.
+        win           — half-width of search window in ω bins.
+        use_argmax    — True: take argmax (unbiased at window edges, for pass 1).
+                        False: energy centroid (sub-bin precision, for pass 2).
+        Returns (all_A, all_b, all_w, scatter_list).
+        scatter_list always has len == len(systems_draft).
+        """
+        all_A, all_b, all_w = [], [], []
+        scatter = []
+        for s_idx, _ in enumerate(systems_draft):
+            i_v, j_v = sys_masks[s_idx]
+            if len(i_v) < _MULTI_MIN_CELLS:
+                scatter.append(_empty)
                 continue
-            sl = spec_3d_ship[lo:hi, i, j].astype(np.float64)
-            w  = sl.sum()
-            if w <= 0:
+            sA, sb, sw = [], [], []
+            k_pts, om_pts, w_pts = [], [], []
+            for i, j in zip(i_v, j_v):
+                om_ref_ij = float(omega_ref[i, j])
+                om_ctr    = om_ref_ij + float(KX[i, j]) * Ucx_p + float(KY[i, j]) * Ucy_p
+                ci = int(round(om_ctr / om_max * (n_om - 1)))
+                ci = max(0, min(n_om - 1, ci))
+                lo = max(1,    ci - win)
+                hi = min(n_om, ci + win + 1)
+                if hi <= lo:
+                    continue
+                sl = spec_3d_ship[lo:hi, i, j].astype(np.float64)
+                if use_argmax:
+                    pk       = int(np.argmax(sl))
+                    peak_val = float(sl[pk])
+                    if peak_val <= 0:
+                        continue
+                    om_c = float(om_arr[lo + pk])
+                    wt   = peak_val / max(float(K_abs[i, j]), 1e-6)
+                    w_sc = peak_val
+                else:
+                    w = sl.sum()
+                    if w <= 0:
+                        continue
+                    om_c = float(np.dot(sl, om_arr[lo:hi])) / w
+                    wt   = w / max(float(K_abs[i, j]), 1e-6)
+                    w_sc = w
+                sA.append([float(KX[i, j]), float(KY[i, j])])
+                sb.append(om_c - om_ref_ij)
+                sw.append(wt)
+                k_pts.append(float(k_phys[i, j]))
+                om_pts.append(om_c)
+                w_pts.append(w_sc)
+            if len(sA) < _MULTI_MIN_CELLS:
+                scatter.append(_empty)
                 continue
-            om_c = float(np.dot(sl, om_arr[lo:hi])) / w
-            sys_A.append([float(KX[i, j]), float(KY[i, j])])
-            sys_b.append(om_c - om_ref_ij)
-            sys_w.append(w / max(float(K_abs[i, j]), 1e-6))
-            k_pts.append(float(k_phys[i, j]))
-            om_pts.append(om_c)
-            w_pts.append(w)
+            w_arr = np.array(sw);  w_arr /= w_arr.sum()
+            all_A.extend(sA);  all_b.extend(sb);  all_w.extend(w_arr.tolist())
+            scatter.append((np.array(k_pts), np.array(om_pts), np.array(w_pts)))
+        return all_A, all_b, all_w, scatter
 
-        if len(sys_A) < _MULTI_MIN_CELLS:
-            sys_scatter.append((np.array([]), np.array([]), np.array([])))
-            continue
+    def _solve(all_A, all_b, all_w):
+        if len(all_A) < 4:
+            return None, None
+        A   = np.array(all_A)
+        b   = np.array(all_b)
+        wsq = np.sqrt(np.array(all_w))
+        _, sv, _ = np.linalg.svd(A * wsq[:, None], full_matrices=False)
+        if sv[-1] < _MULTI_MIN_SV_RATIO * sv[0]:
+            return None, None
+        res, _, _, _ = np.linalg.lstsq(A * wsq[:, None], b * wsq, rcond=None)
+        return float(res[0]), float(res[1])
 
-        # Normalise per-system: each system contributes equally regardless of energy
-        w_arr = np.array(sys_w);  w_arr /= w_arr.sum()
+    def _clip(Ucx, Ucy):
+        mag = float(np.hypot(Ucx, Ucy))
+        if mag > _MULTI_MAX_CURRENT:
+            f = _MULTI_MAX_CURRENT / mag
+            return Ucx * f, Ucy * f
+        return Ucx, Ucy
 
-        all_A.extend(sys_A);  all_b.extend(sys_b);  all_w.extend(w_arr.tolist())
-        sys_scatter.append((np.array(k_pts), np.array(om_pts), np.array(w_pts)))
+    empty_scatter = [_empty for _ in systems_draft]
 
-    if len(all_A) < 4:
-        return None, None, sys_scatter
+    # Pass 1: argmax in wide window, no current prior
+    A1, b1, w1, _ = _run_pass(0.0, 0.0, win=wide, use_argmax=True)
+    Ucx0, Ucy0 = _solve(A1, b1, w1)
+    if Ucx0 is None:
+        return None, None, empty_scatter
+    Ucx0, Ucy0 = _clip(Ucx0, Ucy0)
 
-    A   = np.array(all_A)
-    b   = np.array(all_b)
-    wsq = np.sqrt(np.array(all_w))
-
-    _, sv, _ = np.linalg.svd(A * wsq[:, None], full_matrices=False)
-    if sv[-1] < _MULTI_MIN_SV_RATIO * sv[0]:
-        return None, None, sys_scatter
-
-    res, _, _, _ = np.linalg.lstsq(A * wsq[:, None], b * wsq, rcond=None)
-    Ucx, Ucy = float(res[0]), float(res[1])
-
-    mag = float(np.hypot(Ucx, Ucy))
-    if mag > _MULTI_MAX_CURRENT:
-        f = _MULTI_MAX_CURRENT / mag
-        Ucx, Ucy = Ucx * f, Ucy * f
+    # Pass 2: centroid in narrow window centred on pass-1 estimate
+    A2, b2, w2, sys_scatter = _run_pass(Ucx0, Ucy0, win=band, use_argmax=False)
+    Ucx, Ucy = _solve(A2, b2, w2)
+    if Ucx is None:
+        # Pass 2 degenerate (very rare); keep pass-1 result
+        return Ucx0, Ucy0, sys_scatter
+    Ucx, Ucy = _clip(Ucx, Ucy)
 
     return Ucx, Ucy, sys_scatter
 

@@ -185,7 +185,6 @@ def main():
         os.makedirs(d, exist_ok=True)
 
     df_all = pd.read_csv(args.csv)
-    df_all = df_all[df_all["num"] > 437]
     if 'pulse' in df_all.columns:
         df_all['pulse'] = df_all['pulse'].apply(_pulse_str)
 

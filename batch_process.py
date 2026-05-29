@@ -42,12 +42,13 @@ _SIGNAL_BAND  = 10    # must match processor.py
 _MAX_CURRENT  = 2.55  # physical clip for ocean current [m/s]
 
 # Quality thresholds — hardcoded, same as processor.py
-_SNR_QUALITY_MIN = 1.5
-_WIND_SIG_MIN    = 5.0
+_SNR_QUALITY_MIN = 5.0
+_WIND_SIG_MIN    = 5.5
 _T_PEAK_MIN      = 5.5
 
 _F_DISPLAY   = 0.20   # Hz — radial limit on polar spectrum display
-_BUOY_SKIP_SEC = 420  # skip first 7 min of buoy data (deployment)
+_BUOY_SKIP_SEC = 420   # skip first 7 min of buoy data (deployment transit)
+_BUOY_END_SEC  = 2220  # stop at 37 min (use only the 7–37 min window)
 
 # Colours for identified wave systems (index = system rank by amplitude)
 _SYS_COLORS = ['cyan', 'lime', 'orange']
@@ -63,6 +64,7 @@ _PARAMS_FIELDS = [
     "u_x", "u_y",
     "wind_sig", "wind_dir",
     "sog_proc", "cog_proc", "hdg_proc",
+    "swh_buoy", "t_peak_buoy", "t_mean_buoy", "dp_buoy", "dm_buoy",
 ]
 
 
@@ -172,10 +174,11 @@ def _load_buoy_data(nc_path):
         print(f'[buoy] Only {len(time_b)} valid samples — skipping')
         return None
 
-    mask = (time_b - time_b[0]) >= _BUOY_SKIP_SEC
+    elapsed = time_b - time_b[0]
+    mask = (elapsed >= _BUOY_SKIP_SEC) & (elapsed <= _BUOY_END_SEC)
     n_kept = int(mask.sum())
     if n_kept < 100:
-        print(f'[buoy] Only {n_kept} samples after {_BUOY_SKIP_SEC}s skip — skipping')
+        print(f'[buoy] Only {n_kept} samples in [{_BUOY_SKIP_SEC}s, {_BUOY_END_SEC}s] window — skipping')
         return None
 
     return {'time': time_b[mask], 'x': x_b[mask], 'y': y_b[mask], 'z': z_b[mask]}
@@ -251,10 +254,16 @@ def _compute_buoy_spectra(buoy_raw, n_freq, om_max):
         print(f'[buoy] EWDM failed: {exc}')
         traceback.print_exc()
 
-    # Buoy Welch peak and mean frequency
-    f_peak_hz = float(f_w[np.argmax(Szz)]) if len(Szz) > 0 else None
-    denom = float(np.sum(Szz))
-    f_mean_hz = float(np.dot(f_w, Szz) / denom) if denom > 0 else None
+    # SWH from spectral integral: Hs = 4·√m0,  m0 = ∫ Szz df
+    m0_buoy  = float(np.trapz(Szz, f_w))
+    swh_buoy = float(4.0 * np.sqrt(max(m0_buoy, 0.0)))
+
+    # Peak and mean period from 1D Welch spectrum
+    f_peak_hz   = float(f_w[np.argmax(Szz)]) if len(Szz) > 0 else None
+    t_peak_buoy = float(1.0 / f_peak_hz) if f_peak_hz and f_peak_hz > 0 else None
+    denom       = float(np.sum(Szz))
+    f_mean_hz   = float(np.dot(f_w, Szz) / denom) if denom > 0 else None
+    t_mean_buoy = float(1.0 / f_mean_hz) if f_mean_hz and f_mean_hz > 0 else None
 
     # EWDM directional peak and mean
     dp_buoy = dm_buoy = None
@@ -273,13 +282,16 @@ def _compute_buoy_spectra(buoy_raw, n_freq, om_max):
             pass
 
     return {
-        'freq_hz':    out_om / (2 * np.pi),
-        's_freq_255': s_freq_255,
-        'ewdm':       ewdm_out,
-        'f_peak_hz':  f_peak_hz,
-        'f_mean_hz':  f_mean_hz,
-        'dp_buoy':    dp_buoy,
-        'dm_buoy':    dm_buoy,
+        'freq_hz':     out_om / (2 * np.pi),
+        's_freq_255':  s_freq_255,
+        'ewdm':        ewdm_out,
+        'swh_buoy':    swh_buoy,
+        'f_peak_hz':   f_peak_hz,
+        't_peak_buoy': t_peak_buoy,
+        'f_mean_hz':   f_mean_hz,
+        't_mean_buoy': t_mean_buoy,
+        'dp_buoy':     dp_buoy,
+        'dm_buoy':     dm_buoy,
     }
 
 
@@ -314,13 +326,13 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
 
     pulse_str = _pulse_str(pulse)
 
-    fig = Figure(figsize=(15, 10))
+    fig = Figure(figsize=(16, 11))
     FigureCanvasAgg(fig)
     fig.suptitle(f'{name}   [{pulse_str}]', fontsize=11, y=0.998)
 
-    gs = GridSpec(3, 3, figure=fig, height_ratios=[2, 1, 1],
-                  hspace=0.45, wspace=0.30,
-                  left=0.06, right=0.97, top=0.96, bottom=0.03)
+    gs = GridSpec(3, 3, figure=fig, height_ratios=[3, 1, 1],
+                  hspace=0.2, wspace=0.2,
+                  left=0.06, right=0.97, top=0.95, bottom=0.03)
 
     # ── Panel 0,0: 1D frequency spectrum (0..255, same as UDP) ────────────────
     ax0 = fig.add_subplot(gs[0, 0])
@@ -345,6 +357,18 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
         ax0.text(f_pk, 245, f'T={T_s:.1f}s', color=clr, fontsize=7,
                  ha='center', va='top',
                  bbox=dict(boxstyle='round,pad=0.1', fc='#111111', alpha=0.6))
+
+    if buoy_proc is not None and buoy_proc.get('s_freq_255') is not None:
+        ax0.plot(buoy_proc['freq_hz'], buoy_proc['s_freq_255'],
+                 lw=1.2, color='orange', alpha=0.85, label='Buoy')
+        t_pk_b = buoy_proc.get('t_peak_buoy')
+        t_mn_b = buoy_proc.get('t_mean_buoy')
+        if t_pk_b and t_pk_b > 0:
+            ax0.axvline(1.0 / t_pk_b, color='orange', ls='-',  lw=1.2,
+                        label=f'Buoy Tp={t_pk_b:.1f}s')
+        if t_mn_b and t_mn_b > 0:
+            ax0.axvline(1.0 / t_mn_b, color='orange', ls='--', lw=1.0,
+                        label=f'Buoy Tm={t_mn_b:.1f}s')
 
     ax0.set_xlim(0, freq_out[-1])
     ax0.set_ylim(0, 255)
@@ -582,6 +606,20 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
          'SOG [m/s]',    f'{sog_mean:.2f}',
          'COG [°]',      f'{cog_mean:.1f}'],
     ]
+    if buoy_proc is not None:
+        _bswh  = buoy_proc.get('swh_buoy')
+        _btp   = buoy_proc.get('t_peak_buoy')
+        _btm   = buoy_proc.get('t_mean_buoy')
+        _bdp   = buoy_proc.get('dp_buoy')
+        _bdm   = buoy_proc.get('dm_buoy')
+        rows.append([
+            'Buoy Hs [m]',  f'{_bswh:.3f}'  if _bswh  is not None else '—',
+            'Buoy Tp [s]',  f'{_btp:.2f}'   if _btp   is not None else '—',
+            'Buoy Tm [s]',  f'{_btm:.2f}'   if _btm   is not None else '—',
+            'Buoy Dp [°]',  f'{_bdp:.1f}'   if _bdp   is not None else '—',
+            'Buoy Dm [°]',  f'{_bdm:.1f}'   if _bdm   is not None else '—',
+            '',              '',
+        ])
 
     col_labels = ['Par', 'Val'] * 6
     tbl = ax4.table(cellText=rows, colLabels=col_labels,
@@ -842,7 +880,19 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         except Exception as exc:
             log.warning(f'{name}: pic save failed: {exc}', exc_info=True)
 
+    if spec_dir is not None:
+        try:
+            np.save(os.path.join(spec_dir, f'{name}_freqspec.npy'), spec_1d)
+            np.save(os.path.join(spec_dir, f'{name}_dirspec.npy'),  spec_2d)
+        except Exception as exc:
+            log.warning(f'{name}: spec save failed: {exc}')
+
     ws = sys.get('w_s')
+
+    def _bp(key):
+        v = buoy_proc.get(key) if buoy_proc else None
+        return float(v) if v is not None else np.nan
+
     row = {
         'name':     name,
         'pulse':    _pulse_str(pulse),
@@ -871,6 +921,11 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         'sog_proc': sog_mean,
         'cog_proc': cog_mean,
         'hdg_proc': hdg_mean,
+        'swh_buoy':    _bp('swh_buoy'),
+        't_peak_buoy': _bp('t_peak_buoy'),
+        't_mean_buoy': _bp('t_mean_buoy'),
+        'dp_buoy':     _bp('dp_buoy'),
+        'dm_buoy':     _bp('dm_buoy'),
     }
     return row, spec_1d, spec_2d
 
