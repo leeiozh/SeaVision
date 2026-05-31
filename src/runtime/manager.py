@@ -75,10 +75,15 @@ class Manager:
 
     def _start_processor(self):
         with self.proc_lock:
-            self.proc_stop_ev.clear()
+            # New Event each restart: old thread keeps its own (set) event and
+            # exits cleanly; new thread gets a fresh (clear) event — no race.
+            self.proc_stop_ev = Event()
             self.processor = self.processor_factory()
             self._proc_active_time = time()
-            self.t_proc = Thread(target=self._process_loop, name="Process", daemon=True)
+            _stop = self.proc_stop_ev          # capture ref for closure
+            self.t_proc = Thread(
+                target=self._process_loop, args=(_stop,),
+                name="Process", daemon=True)
             self.t_proc.start()
 
     def _restart_processor(self, reason: str):
@@ -87,6 +92,7 @@ class Manager:
                 return  # restart already in progress
             self.proc_stop_ev.set()
 
+        print()  # end any in-progress \r progress bar before restart message
         log.warning(f"Restarting processor: {reason}")
         _drain(self.in_queue)
         sleep(0.1)
@@ -155,19 +161,46 @@ class Manager:
 
     # ── process thread ────────────────────────────────────────────────────────
 
-    def _process_loop(self):
+    def _process_loop(self, stop_ev: Event):
         log.info("Process thread started")
-        while not self.stop_ev.is_set() and not self.proc_stop_ev.is_set():
+
+        _n_shots   = self.cfg.const.N_SHOTS
+        _out_times = max(1, int(self.cfg.output.get('out_times', 32)))
+        _bar_w     = 28
+        _frames_in = 0
+        _frames_since_out = 0
+        _bar_active = False   # True when a \r line is pending (needs \n to close)
+
+        def _bar(filled, total):
+            n = int(_bar_w * min(filled, total) / total)
+            return '█' * n + '░' * (_bar_w - n)
+
+        while not self.stop_ev.is_set() and not stop_ev.is_set():
             try:
                 item = self.in_queue.get(timeout=1.0)
             except Empty:
                 continue
 
             back, navi = item
+            _frames_in += 1
+            # Only count accumulation frames after the initial buffer is full
+            if _frames_in > _n_shots:
+                _frames_since_out += 1
+
+            # ── progress bar ──────────────────────────────────────────────────
+            if _frames_in <= _n_shots:
+                phase = f'Buffering  [{_bar(_frames_in, _n_shots)}] {_frames_in:4d}/{_n_shots}'
+            else:
+                phase = f'Accumulate [{_bar(_frames_since_out, _out_times)}] {_frames_since_out:3d}/{_out_times}'
+            print(f'\r  {phase}', end='', flush=True)
+            _bar_active = True
+
             try:
                 result = self.processor.update(back, navi)
                 self._proc_active_time = time()
             except Exception:
+                print()
+                _bar_active = False
                 log.exception("Processing error")
                 self._restart_processor("processing exception")
                 return
@@ -175,26 +208,38 @@ class Manager:
             if result["out"] is None:
                 continue
 
+            # ── result ready ──────────────────────────────────────────────────
+            print()  # close the \r progress bar
+            _bar_active = False
+            _frames_since_out = 0
+            o = result["out"]
+            curr_spd = getattr(o, 'curr_speed', 0.0)
+            curr_dir = getattr(o, 'curr_dir',   0.0)
+            print(
+                f'  → Hs={o.wave_sum.swh:.2f}m  Tp={o.wave_sum.t_p:.1f}s  '
+                f'Dp={o.wave_sum.d_p:.0f}°  Nsys={o.ide_sys}  '
+                f'Curr={curr_spd:.2f}m/s@{curr_dir:.0f}°  '
+                f'{"GOOD" if o.n_dis else "BAD"}'
+            )
+            log.info(
+                f"Hs={o.wave_sum.swh:.2f}m  Tp={o.wave_sum.t_p:.1f}s  "
+                f"Dp={o.wave_sum.d_p:.0f}°  Curr={curr_spd:.2f}m/s  "
+                f"Nsys={o.ide_sys}"
+            )
+
             proc_result = ProcessResult(
                 output=result["out"],
                 port=result["port"],
                 navi=navi,
-            )
-            o = proc_result.output
-            log.info(
-                f"Hs={o.wave_sum.swh:.2f}m  "
-                f"Tp={o.wave_sum.t_p:.1f}s  "
-                f"Dp={o.wave_sum.d_p:.0f}°  "
-                f"Lam={getattr(o, 'lam_peak', 0)}m  "
-                f"Wdir={o.wave_win.d_p:.0f}°  "
-                f"Vcur={getattr(o, 'u_proj', 0.0):.2f}m/s  "
-                f"Nsys={o.ide_sys}"
             )
             try:
                 self.out_queue.put_nowait(proc_result)
             except Full:
                 log.warning("Output queue full — result dropped")
 
+        # Clean up any pending \r progress bar when this thread exits
+        if _bar_active:
+            print()
         log.warning("Process thread stopped")
 
     # ── output thread ─────────────────────────────────────────────────────────

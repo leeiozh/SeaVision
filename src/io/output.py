@@ -1,8 +1,8 @@
 import numpy as np
 from struct import pack
 from datetime import datetime
-from src.io.structs import Output, Wave, Navi, ProcessResult
 from src.io.service import create_out_socket
+from src.io.structs import Wave, Navi, ProcessResult
 
 
 class OutputSink:
@@ -28,24 +28,24 @@ class UdpOutputSink(OutputSink):
         # un[26] (vco, signed int16) → reserved / 0
         # un[27] H (NEW)            → wind_dir, integer degrees 0-360
         # un[28] H (NEW)            → wspd × 10 (0.1 m/s resolution)
-        _curr_dir   = int(round(getattr(o, 'curr_dir',   0.0))) % 360
+        _curr_dir = int(round(getattr(o, 'curr_dir', 0.0))) % 360
         _curr_spd_b = int(np.clip(round(getattr(o, 'curr_speed', 0.0) * 100), 0, 255))
-        _wind_dir   = int(round(getattr(o, 'wind_dir',   0.0))) % 360
-        _wspd10     = int(np.clip(round(getattr(o, 'wspd', 0.0) * 10), 0, 65535))
+        _wind_dir = int(round(getattr(o, 'wind_dir', 0.0))) % 360
+        _wspd10 = int(np.clip(round(getattr(o, 'wspd', 0.0) * 10), 0, 65535))
         data = pack(
             f"<BBHHBBHHHHHBBHHHHHHHHHHHHHhHH{self.n_freqs}B{self.n_freqs * self.num_area}B",
             5,
             o.pulse,
             round(o.step * 1000),
-            round(o.rps * 100),          # [3]  rps (restored)
+            round(o.rps * 100),  # [3]  rps (restored)
             o.n_in_win,
             o.n_wins,
-            round(o.step_area * 1000),   # [6]  step_area (restored)
-            _curr_dir,                   # [7]  curr_dir [°], was n_area
+            round(o.step_area * 1000),  # [6]  step_area (restored)
+            _curr_dir,  # [7]  curr_dir [°], was n_area
             o.n_start,
             round(o.cog_proc * 100),
             round(o.sog_proc * 100),
-            _curr_spd_b,                 # [11] curr_speed [cm/s], was max_sys
+            _curr_spd_b,  # [11] curr_speed [cm/s], was max_sys
             o.ide_sys,
             round(o.wave_sum.swh * 100),
             round(o.wave_sum.d_p * 100),
@@ -60,9 +60,9 @@ class UdpOutputSink(OutputSink):
             round(o.wave_sw2.d_p * 100),
             round(o.wave_sw2.t_p * 100),
             o.n_dis,
-            0,                           # [26] reserved (was vco/u_proj)
-            _wind_dir,                   # [27] wind_dir [°] (NEW)
-            _wspd10,                     # [28] wspd × 10 [0.1 m/s] (NEW)
+            0,  # [26] reserved (was vco/u_proj)
+            _wind_dir,  # [27] wind_dir [°] (NEW)
+            _wspd10,  # [28] wspd × 10 [0.1 m/s] (NEW)
             *o.spec_1d,
             *o.spec_2d.flatten(),
         )

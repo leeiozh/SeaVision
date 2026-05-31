@@ -16,10 +16,11 @@ class ProtocolError(ValueError):
 
 
 class BackData:
-    def __init__(self, step: float, pulse: int, bck: np.ndarray):
-        self.step = step  # range resolution
-        self.pulse = pulse  # bite of pulse length
-        self.bck = bck  # backscatter in polar coordinates (AAP, AREA_READ_DIST_PX)
+    def __init__(self, step: float, pulse: int, bck: np.ndarray, n_received: int = -1):
+        self.step = step        # range resolution
+        self.pulse = pulse      # bite of pulse length
+        self.bck = bck          # backscatter in polar coordinates (AAP, AREA_READ_DIST_PX)
+        self.n_received = n_received  # UDP: lines actually received; -1 = not tracked (NC/BT8)
 
 
 # Struct format:
@@ -41,10 +42,10 @@ _BCK_PAYLOAD_SIZE = 1024
 class BackPack:
     def __init__(self, num_line: int, step: float, part_index: int, part_value: int, pulse: int, payload: bytes):
         self.num_line = num_line
-        self.step = step  # range resolution
+        self.step = step
         self.part_index = part_index
         self.part_value = part_value
-        self.pulse = pulse  # bite of pulse length
+        self.pulse = pulse
         self.payload = payload
 
 

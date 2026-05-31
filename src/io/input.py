@@ -2,7 +2,6 @@ import os
 import numpy as np
 from glob import glob
 from time import time
-from socket import socket
 from typing import Optional
 from src.io.service import create_inp_socket
 from src.io.structs import Navi, BackData, BackPack, \
@@ -153,6 +152,14 @@ class UdpInputSource(InputSource):
             except TimeoutError:
                 continue
 
+        n_recv = int(np.sum(ready_vec))
+        self.curr_bck.n_received = n_recv
+        if n_recv < ready_vec.size:
+            pct = 100.0 * n_recv / ready_vec.size
+            print()  # newline so the warning doesn't corrupt the \r progress bar
+            log.warning(
+                f'Frame incomplete: {n_recv}/{ready_vec.size} lines ({pct:.0f}%) — '
+                f'packet loss. Increase rmem_max or LINE_SLEEP in tester.')
         return self.curr_bck
 
     def close(self):
@@ -166,7 +173,7 @@ class NCInputSource(InputSource):
         from netCDF4 import Dataset
         self.file_path = file_path
         self.dataset = Dataset(file_path)
-        self.curr_ind = 0
+        self.curr_ind = -1
 
     def get_bck(self) -> BackData:
         self.curr_ind += 1
@@ -178,12 +185,13 @@ class NCInputSource(InputSource):
                             self.dataset["bsktr_radar"][self.curr_ind])
 
     def get_navi(self) -> Navi:
-        return Navi(self.dataset["giro_radar"][self.curr_ind],
-                    self.dataset["cog_radar"][self.curr_ind],
-                    self.dataset["sog_radar"][self.curr_ind],
-                    self.dataset["sog_radar"][self.curr_ind],
-                    self.dataset["lat_radar"][self.curr_ind],
-                    self.dataset["lon_radar"][self.curr_ind])
+        i = self.curr_ind
+        return Navi(float(self.dataset["giro_radar"][i]),
+                    float(self.dataset["cog_radar"][i]),
+                    float(self.dataset["sog_radar"][i]),
+                    float(self.dataset["sog_radar"][i]),
+                    float(self.dataset["lat_radar"][i]),
+                    float(self.dataset["lon_radar"][i]))
 
     def close(self):
         self.dataset.close()

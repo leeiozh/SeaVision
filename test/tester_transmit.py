@@ -5,7 +5,7 @@ import time
 import numpy as np
 from netCDF4 import Dataset
 
-NETCDF_FILE = "/media/leeiozh/EZH/DATA/old_radar_data/0606_4340.nc"
+NETCDF_FILE = "/media/leeiozh/EZH/DATA/old_radar_data/0606_4338.nc"
 SERVER_IP = '127.0.0.1'
 PRLI_PORT = 4001
 NAVI_PORT = 4002
@@ -15,9 +15,19 @@ N_PARTS = 2  # 2 × 1024 B = 2048 B = AREA_READ_DIST_PX (parser rejects parts 3 
 ADP = 1192   # AREA_DISTANCE_PX — center of the processing window
 ASP = 192    # AREA_SIZE_PX    — half-width of the processing window
 
-# Gap between rotations. 0.3 was the safe baseline with 4 parts;
-# with N_PARTS=2 try 0.15 or even 0.1 — drop back to 0.3 if lines get lost.
-ROTATION_SLEEP = 0.15
+# ── throttle ──────────────────────────────────────────────────────────────────
+# Problem: OS default rmem_max ≈ 208 KB, but one frame = 8.45 MB.
+# Without LINE_SLEEP, all 8192 packets burst out in <2 ms; the kernel drops
+# everything beyond the ~400-packet buffer → ~95% packet loss.
+# Fix: sleep LINE_SLEEP seconds after each azimuth line (= after 2 packets).
+# At 200 µs/line: send time ≈ 410 ms, well within ROTATION_SLEEP.
+# Permanent OS fix: sudo sysctl -w net.core.rmem_max=33554432
+LINE_SLEEP = 0.0001   # 100 µs between lines; keeps send rate ~13k pkt/s < kernel buffer limit
+                      # (default rmem_max ≈ 413 packets; 100µs → buffer at ~13%, no drops)
+                      # For 0 sleep: sudo sysctl -w net.core.rmem_max=33554432 first
+
+# Gap between rotations (added on top of send time).
+ROTATION_SLEEP = 0.3
 
 PRLI_SOCK = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 PRLI_SOCK.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024 * 16)
@@ -46,6 +56,8 @@ def send_prli_packets(bcksctr, step, pulse):
             header = struct.pack('<BHHBBB', 8, line, step_i, part, N_PARTS, pulse)
             PRLI_SOCK.sendto(header + bcksctr[line][start:start + 1024].tobytes(),
                              (SERVER_IP, PRLI_PORT))
+        if LINE_SLEEP > 0:
+            time.sleep(LINE_SLEEP)   # throttle: let receiver drain kernel buffer
 
 
 def stream_data():

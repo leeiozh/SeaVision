@@ -18,10 +18,8 @@ from src.algorithms.spectrum2d import (
     calc_spec2d,
 )
 
-_SIGNAL_BAND  = 10    # ±bins around ω=√(gk) for signal extraction (shared by all steps)
-_MAX_CURRENT  = 2.55  # physical clip for ocean current [m/s]
-
-# Quality thresholds (hardcoded, not in config)
+_SIGNAL_BAND  = 10
+_MAX_CURRENT  = 2.55
 _SNR_QUALITY_MIN = 5.0
 _WIND_SIG_MIN    = 5.5
 _T_PEAK_MIN      = 5.5
@@ -32,8 +30,212 @@ from src.io.structs import Wave, WaveOutput
 # Debug colour palette — index matches system position in systems_draft
 _SYS_COLORS = ['cyan', 'lime', 'orange']
 
+_F_DISPLAY = 0.20   # Hz — radial limit on polar spectrum display
+_PULSE_STR = {1: 'SP', 2: 'MP', 3: 'LP'}
 
-# ── debug helpers ─────────────────────────────────────────────────────────────
+
+# ── single combined debug figure (replaces 4 separate PNGs) ──────────────────
+
+def _save_debug_pic(
+    s_omega_pre, omega_vals, systems_draft,
+    s_om_th, sys_dict, n_dirs,
+    port_corr, k_vals, k_max, Ux, Uy, sys_scatter, sog=0.0, cog_deg=0.0,
+    swh=0.0, T_peak=0.0, T_mean=0.0, peak_dir=0.0,
+    quality=0, snr_tot=0.0, wdir=0.0, wspd=0.0, wind_sig=0.0,
+    pulse=0, n_sys=0,
+    path='.',
+):
+    """Single diagnostic figure combining 1D spectrum, polar directional spectrum,
+    ω-k portrait and parameter table.  Mirrors batch_process._save_pic."""
+    import os
+    from matplotlib.gridspec import GridSpec
+
+    out_path = path if path.endswith('.png') else os.path.join(path, 'debug_combined.png')
+
+    cog_rad     = np.deg2rad(cog_deg)
+    Ux_ship     = sog * np.sin(cog_rad)
+    Uy_ship     = sog * np.cos(cog_rad)
+    peak_rad    = np.deg2rad(peak_dir)
+    u_proj      = float(Ux * np.cos(peak_rad) + Uy * np.sin(peak_rad))
+    u_ship_proj = float(Ux_ship * np.cos(peak_rad) + Uy_ship * np.sin(peak_rad))
+    u_curr_x    = float(Ux) - Ux_ship
+    u_curr_y    = float(Uy) - Uy_ship
+    curr_speed  = float(np.hypot(u_curr_x, u_curr_y))
+    curr_dir    = float(np.degrees(np.arctan2(u_curr_x, u_curr_y)) % 360)
+
+    fig = Figure(figsize=(16, 9))
+    FigureCanvasAgg(fig)
+    gs = GridSpec(2, 3, figure=fig, height_ratios=[3, 1.2],
+                  hspace=0.22, wspace=0.22,
+                  left=0.06, right=0.97, top=0.95, bottom=0.04)
+
+    f_axis = omega_vals / (2 * np.pi)
+    f_max  = float(omega_vals[-1]) / (2 * np.pi)
+
+    # ── [0,0] 1D frequency spectrum (ship-corrected, pre-analysis) ───────────
+    ax0 = fig.add_subplot(gs[0, 0])
+    ax0.set_facecolor('#111111'); fig.patch.set_facecolor('#111111')
+    ax0.plot(f_axis, s_omega_pre, color='white', lw=1.2)
+    ax0.fill_between(f_axis, s_omega_pre, alpha=0.22, color='steelblue')
+    s_max = float(s_omega_pre.max()) if s_omega_pre.max() > 0 else 1.0
+    if T_peak > 0:
+        ax0.axvline(1.0 / T_peak, color='white', ls='-',  lw=1.3)
+    if T_mean > 0:
+        ax0.axvline(1.0 / T_mean, color='white', ls='--', lw=1.0, alpha=0.7)
+    for s_idx, sys in enumerate(systems_draft or []):
+        clr = _SYS_COLORS[s_idx % len(_SYS_COLORS)]
+        f_lo = sys['om_lo'] / (2 * np.pi)
+        f_hi = sys['om_hi'] / (2 * np.pi)
+        f_pk = sys['om']    / (2 * np.pi)
+        T_s  = 1.0 / f_pk if f_pk > 0 else 0.0
+        ax0.axvspan(f_lo, f_hi, alpha=0.14, color=clr)
+        ax0.axvline(f_pk, color=clr, lw=1.5, zorder=4,
+                    label=f'sys{s_idx} T={T_s:.1f}s {sys["dir_deg"]:.0f}°')
+        ax0.text(f_pk, s_max * 0.93, f'T={T_s:.1f}s', color=clr,
+                 fontsize=7, ha='center', va='top',
+                 bbox=dict(boxstyle='round,pad=0.1', fc='#222222', alpha=0.7))
+    ax0.set_xlim(0, f_max); ax0.set_ylim(0)
+    ax0.set_xlabel('f [Hz]', color='white'); ax0.set_ylabel('S(f)  [a.u.]', color='white')
+    ax0.set_title('Spectrum (ship-corrected)', color='white', fontsize=9)
+    ax0.tick_params(colors='white')
+    for sp in ax0.spines.values(): sp.set_edgecolor('#555555')
+    if systems_draft:
+        ax0.legend(fontsize=7, loc='upper right', facecolor='#222222', labelcolor='white')
+
+    # ── [0,1] polar directional spectrum (final, after full correction) ──────
+    ax1 = fig.add_subplot(gs[0, 1], projection='polar')
+    ax1.set_theta_zero_location('N'); ax1.set_theta_direction(-1)
+    n_om_s   = s_om_th.shape[1]
+    f_vals_s = np.linspace(0, f_max, n_om_s)
+    f_mask   = f_vals_s <= _F_DISPLAY
+    f_disp   = f_vals_s[f_mask]
+    s_disp   = s_om_th[:, f_mask]                           # (n_dirs, n_f_disp)
+    n_f_disp = s_disp.shape[1]
+    # theta edges: n_dirs+1 to close ring; r edges: n_f_disp+1
+    theta_e  = np.linspace(0, 2 * np.pi, n_dirs + 1)       # (37,)
+    r_e      = np.linspace(0, _F_DISPLAY, n_f_disp + 1)    # (n_f_disp+1,)
+    T2D, R2D = np.meshgrid(theta_e, r_e)                   # (n_f_disp+1, 37) each
+    vmax     = float(s_disp.max()) or 1.0
+    # C must be (n_f_disp, n_dirs) for shading='flat'
+    ax1.pcolormesh(T2D, R2D, s_disp.T, cmap='gnuplot2', vmin=0, vmax=vmax, shading='flat')
+    ax1.set_ylim(0, _F_DISPLAY); ax1.set_rlabel_position(45)
+    ax1.tick_params(labelsize=7)
+    # Final system direction lines (only for detected systems with Tp > 0)
+    sys_styles = [('w_s', 'cyan', 'W sea'), ('sw_1', 'lime', 'Swell-1'), ('sw_2', 'orange', 'Swell-2')]
+    for key, clr, lbl in sys_styles:
+        s = sys_dict.get(key)
+        if s and s.get('t_p', 0) > 0:
+            ax1.plot([np.deg2rad(s['d_p'])] * 2, [0, _F_DISPLAY * 0.88],
+                     color=clr, lw=2.2, alpha=0.9, label=lbl)
+    ax1.plot([np.deg2rad(peak_dir)] * 2, [0, _F_DISPLAY * 0.82],
+             color='red', lw=2.0, alpha=0.85, label='Sum')
+    ax1.plot([np.deg2rad(cog_deg)] * 2, [0, _F_DISPLAY * 0.45],
+             color='deepskyblue', lw=1.5, ls='--', alpha=0.75, label='COG')
+    # NOTE: systems_draft '+' markers are intentionally NOT shown on the polar plot
+    # (they are already shown in the 1D spectrum panel) to avoid visual confusion.
+    ax1.legend(fontsize=6, loc='lower right', bbox_to_anchor=(1.35, -0.05))
+    ax1.set_title('Dir. spectrum (final)', color='white', fontsize=9, pad=12)
+    ax1.set_facecolor('#111111')
+
+    # ── [0,2] ω-k portrait (pre-correction) ──────────────────────────────────
+    ax2 = fig.add_subplot(gs[0, 2])
+    ax2.set_facecolor('#111111')
+    if port_corr is not None:
+        k_arr   = k_vals
+        om_disp = np.sqrt(9.81 * k_arr)
+        vmax_p  = max(float(port_corr.max()), 1e-9)
+        ax2.imshow(port_corr, aspect='auto', origin='lower', cmap='gnuplot2',
+                   extent=[0, k_max, 0, float(omega_vals[-1])],
+                   vmin=0, vmax=vmax_p, interpolation='none')
+        # Undisturbed dispersion
+        ax2.plot(k_arr, om_disp, 'w--', lw=1.0, label='ω=√(gk)')
+        # Full apparent velocity projection
+        om_full = om_disp + k_arr * u_proj
+        m_full  = (om_full >= 0) & (om_full <= float(omega_vals[-1]))
+        ax2.plot(k_arr[m_full], om_full[m_full], color='red', lw=1.5,
+                 label=f'full {u_proj:+.2f}')
+        # Ship-only projection
+        om_ship = om_disp + k_arr * u_ship_proj
+        m_ship  = (om_ship >= 0) & (om_ship <= float(omega_vals[-1]))
+        ax2.plot(k_arr[m_ship], om_ship[m_ship], color='red', lw=1.5, ls='--',
+                 label=f'ship {u_ship_proj:+.2f}')
+        # Scatter from multiwave regression
+        rng = np.random.default_rng(0)
+        for s_idx, (k_pts, om_pts, w_pts) in enumerate(sys_scatter or []):
+            if len(k_pts) == 0:
+                continue
+            clr = _SYS_COLORS[s_idx % len(_SYS_COLORS)]
+            n = len(k_pts)
+            if n > 150:
+                idx = rng.choice(n, 150, replace=False)
+                k_pts, om_pts, w_pts = k_pts[idx], om_pts[idx], w_pts[idx]
+            sz = (10 + 60 * np.log1p(w_pts / (w_pts.max() + 1e-30) * 1e3)
+                  / np.log1p(1e3)) if w_pts.max() > 0 else np.full(len(k_pts), 15.0)
+            ax2.scatter(k_pts, om_pts, c=clr, s=sz, alpha=0.6, linewidths=0, zorder=4)
+        ax2.set_xlim(0, k_max); ax2.set_ylim(0, float(omega_vals[-1]))
+        ax2.legend(fontsize=6, loc='upper right')
+        ax2.text(0.02, 0.97,
+                 f'Ux={Ux:+.2f} Uy={Uy:+.2f} m/s\ncurr={curr_speed:.2f}→{curr_dir:.0f}°\n'
+                 f'SOG={sog:.2f} COG={cog_deg:.0f}°',
+                 transform=ax2.transAxes, fontsize=6, va='top', color='white',
+                 bbox=dict(facecolor='black', alpha=0.55, pad=2))
+    ax2.set_xlabel('k [rad/m]', color='white'); ax2.set_ylabel('ω [rad/s]', color='white')
+    ax2.set_title('ω-k portrait (pre-correction)', color='white', fontsize=9)
+    ax2.tick_params(colors='white')
+    for sp in ax2.spines.values(): sp.set_edgecolor('#555555')
+
+    # ── [1,:] parameter table ────────────────────────────────────────────────
+    ax3 = fig.add_subplot(gs[1, :])
+    ax3.axis('off'); ax3.set_facecolor('#111111')
+    ws  = sys_dict.get('w_s')
+    sw1 = sys_dict.get('sw_1')
+    sw2 = sys_dict.get('sw_2')
+    def _fv(d, k, fmt):
+        v = d.get(k) if d else None
+        return (fmt % v) if v else '—'
+    rows = [
+        ['Quality',     'GOOD' if quality else 'BAD',
+         'Pulse',       _PULSE_STR.get(pulse, str(pulse)),
+         'Hs [m]',      f'{swh:.3f}',
+         'Tp [s]',      f'{T_peak:.2f}',
+         'Tm [s]',      f'{T_mean:.2f}',
+         'Dp [°]',      f'{peak_dir:.1f}'],
+        ['N sys',       str(n_sys),
+         'Wind from[°]', f'{wdir:.1f}',
+         'Ring std',    f'{wind_sig:.2f}',
+         'SNR tot',     f'{snr_tot:.2f}',
+         'WSPD [m/s]',  f'{wspd:.2f}',
+         'Dm [°]',      '—'],
+        ['Wind Hs',     _fv(ws,  'h_s', '%.3f') if ws else '—',
+         'Wind Tp',     _fv(ws,  't_p', '%.2f') if ws else '—',
+         'Wind Dp',     _fv(ws,  'd_p', '%.1f') if ws else '—',
+         'Wind Tm',     _fv(ws,  't_m', '%.2f') if ws else '—',
+         'Ux [m/s]',    f'{Ux:.3f}',
+         'Uy [m/s]',    f'{Uy:.3f}'],
+        ['Sw1 Hs',      _fv(sw1, 'h_s', '%.3f') if sw1 else '—',
+         'Sw1 Tp',      _fv(sw1, 't_p', '%.2f') if sw1 else '—',
+         'Sw1 Dp',      _fv(sw1, 'd_p', '%.1f') if sw1 else '—',
+         'Sw1 Tm',      _fv(sw1, 't_m', '%.2f') if sw1 else '—',
+         'Curr [m/s]',  f'{curr_speed:.3f}',
+         'Curr dir[°]', f'{curr_dir:.1f}'],
+    ]
+    col_labels = ['Par', 'Val'] * 6
+    tbl = ax3.table(cellText=rows, colLabels=col_labels, loc='center', cellLoc='center')
+    tbl.auto_set_font_size(False); tbl.set_fontsize(8); tbl.scale(1.0, 1.4)
+    for j in range(len(col_labels)):
+        tbl[0, j].set_facecolor('#404040')
+        tbl[0, j].get_text().set_color('white')
+    tbl[1, 1].set_facecolor('#204020' if quality else '#402020')
+    tbl[1, 1].get_text().set_color('white')
+
+    try:
+        fig.savefig(out_path, dpi=120, bbox_inches='tight',
+                    facecolor=fig.get_facecolor())
+    except Exception:
+        pass
+
+
+# ── legacy debug helpers kept for reference but no longer called ──────────────
 
 def _save_debug_segments(cbck, raw_ports, raw_spec3ds, azimuths, k_max, om_max, path):
     """
@@ -364,9 +566,9 @@ class Processor:
 
         s.curr_step  = back.step
         s.curr_pulse = back.pulse
-        s.speed[s.index % cst.MEAN]   = navi.sog
-        s.heading[s.index % cst.MEAN] = navi.hdg
-        s.cog[s.index % cst.MEAN]     = navi.cog
+        s.speed[s.index % cst.N_SHOTS]   = navi.sog   # N_SHOTS ring buf — same window as cbck
+        s.heading[s.index % cst.MEAN]    = navi.hdg   # MEAN buf — HDG output only
+        s.cog[s.index % cst.N_SHOTS]     = navi.cog   # N_SHOTS ring buf — same window as cbck
 
         bck = back.bck
         t   = s.index % cst.N_SHOTS
@@ -396,21 +598,25 @@ class Processor:
                                     dtype=np.float32)
 
             collect_ports = self.pics not in (False, "false")
-            raw_ports   = [] if collect_ports else None
-            raw_spec3ds = [] if collect_ports else None
 
+            # oldest frame sits at (t+1) % N_SHOTS in the ring buffer
+            offset = (t + 1) % cst.N_SHOTS
             for i in range(cst.NUM_AREA):
-                spec_3d_i = calc_spec3d(s.cbck[i], cst.K_NUM)
-                if collect_ports:
-                    port_i, _ = calc_port(spec_3d_i)
-                    raw_ports.append(port_i)
-                    raw_spec3ds.append(spec_3d_i)
-                spec_3d_corr += spec_3d_i
+                spec_3d_corr += calc_spec3d(s.cbck[i], cst.K_NUM, offset=offset)
 
             spec_3d_corr /= cst.NUM_AREA
 
-            sog_mean = float(np.median(s.speed))
-            cog_mean = float(np.median(s.cog))
+            port_corr = calc_port(spec_3d_corr)[0] if collect_ports else None
+
+            # Navi averaged over the same N_SHOTS window as cbck (same offset → same frames).
+            # Eliminates HF spectral artifacts from SOG/COG mismatch at high ship speeds.
+            _spd_win = np.roll(s.speed, -offset)
+            _cog_win = np.roll(s.cog,   -offset)
+            sog_mean = float(np.median(_spd_win))
+            _cr = np.deg2rad(_cog_win)
+            cog_mean = float(
+                np.degrees(np.arctan2(np.mean(np.sin(_cr)), np.mean(np.cos(_cr)))) % 360
+            )
             cog_rad  = np.deg2rad(cog_mean)
 
             # ── Phase 1: ship-speed correction for pre-analysis ───────────────
@@ -536,21 +742,15 @@ class Processor:
             )
 
             # ── Debug plots ───────────────────────────────────────────────────
-            if self.pics not in (False, "false"):
+            if collect_ports:
                 _pics = self.pics if isinstance(self.pics, str) else "./"
-                _save_debug_portrait(
-                    port_fixed, s.curr_step, cst.ASP, cst.K_NUM,
-                    self.om_max, sys, Ux, Uy,
-                    systems_draft, sys_scatter, _pics,
-                    sog=sog_mean, cog_deg=cog_mean)
-                _save_debug_freq_spec(
-                    s_omega_pre, omega_vals, freq_peaks, systems_draft, _pics)
-                _save_debug_spec2d(
-                    s_om_th, omega_vals, wave_sum, sys,
-                    cst.N_DIRS, freq_peaks, systems_draft, _pics)
-                _save_debug_segments(
-                    s.cbck, raw_ports, raw_spec3ds,
-                    self.seg_azimuths, k_max, self.om_max, _pics)
+                _save_debug_pic(
+                    s_omega_pre, omega_vals, systems_draft, s_om_th, sys, cst.N_DIRS,
+                    port_corr, k_vals, k_max, Ux, Uy, sys_scatter, sog=sog_mean, cog_deg=cog_mean,
+                    swh=swh, T_peak=T_peak, T_mean=T_mean, peak_dir=peak_dir,
+                    quality=quality, snr_tot=snr_tot, wdir=wdir,
+                    wspd=wspd, wind_sig=ring_sig, pulse=s.curr_pulse, n_sys=sys["n_sys"], path=_pics,
+                )
 
             self.averager.push(wave_out, spec_1d, spec_2d, port_fixed)
 

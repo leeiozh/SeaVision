@@ -7,18 +7,24 @@ from scipy.ndimage import gaussian_filter, gaussian_filter1d
 
 # ── 3-D spectrum ─────────────────────────────────────────────────────────────
 
-def calc_spec3d(cbck_i, k_num):
+def calc_spec3d(cbck_i, k_num, offset=0):
     """
     3-D Welch power spectrum (ω, kx, ky) for one segment.
     Input: cbck_i shape (N_SHOTS, 2*ASP, 2*ASP).
+    offset: ring-buffer chronological start — index of the oldest frame in cbck_i.
+            Pass (write_pos + 1) % N_SHOTS when cbck_i is a circular buffer.
+            Default 0 means data is already in chronological order.
     Returns positive-frequency half: (N_SHOTS//2, 2*K_NUM, 2*K_NUM), float32.
     """
     asp = cbck_i.shape[1] // 2
-    _, back_f3 = welch(
-        fftshift(fft2(cbck_i, axes=(1, 2)), axes=(1, 2))
-        [:, asp - k_num:asp + k_num, asp - k_num:asp + k_num],
-        axis=0, return_onesided=False,
-    )
+    # spatial FFT first (large intermediate), then slice to k_num — small result (~8 MB)
+    sliced = fftshift(fft2(cbck_i, axes=(1, 2)), axes=(1, 2))[
+        :, asp - k_num:asp + k_num, asp - k_num:asp + k_num
+    ]
+    if offset:
+        # put oldest frame first without touching the large cbck_i array
+        sliced = np.roll(sliced, -offset, axis=0)
+    _, back_f3 = welch(sliced, axis=0, return_onesided=False)
     half = back_f3.shape[0] // 2
     return back_f3[:half].astype(np.float32)
 

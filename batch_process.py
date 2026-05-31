@@ -660,7 +660,7 @@ def _load_frames(name, nc_path, pulse, cfg, log):
     cbck = np.zeros((cst.NUM_AREA, cst.N_SHOTS, 2 * cst.ASP, 2 * cst.ASP), dtype=np.float32)
     last_bck = None
     last_navi = None
-    sog_acc = 0.0
+    sog_acc = []
     cog_sin_acc = cog_cos_acc = 0.0
     hdg_sin_acc = hdg_cos_acc = 0.0
     n_navi = 0
@@ -674,7 +674,7 @@ def _load_frames(name, nc_path, pulse, cfg, log):
             navi = source.get_navi()
             last_bck = back.bck
             last_navi = navi
-            sog_acc += float(navi.sog)
+            sog_acc.append(float(navi.sog))
             _cr = np.deg2rad(float(navi.cog)); cog_sin_acc += np.sin(_cr); cog_cos_acc += np.cos(_cr)
             _hr = np.deg2rad(float(navi.hdg)); hdg_sin_acc += np.sin(_hr); hdg_cos_acc += np.cos(_hr)
             n_navi += 1
@@ -706,7 +706,7 @@ def _load_frames(name, nc_path, pulse, cfg, log):
         'last_bck':  last_bck,
         'last_navi': last_navi,
         'nc_path':   nc_path,
-        'sog_mean':  sog_acc / n_navi,
+        'sog_mean':  float(np.median(sog_acc)) if sog_acc else 0.0,
         'cog_mean':  float(np.degrees(np.arctan2(cog_sin_acc, cog_cos_acc)) % 360),
         'hdg_mean':  float(np.degrees(np.arctan2(hdg_sin_acc, hdg_cos_acc)) % 360),
         'buoy_proc': buoy_proc,

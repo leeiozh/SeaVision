@@ -18,8 +18,6 @@ class ProcessorState:
     heading: np.ndarray = field(default_factory=lambda: np.array([]))
     cog: np.ndarray = field(default_factory=lambda: np.array([]))
 
-    vco: float = 0.0
-
     def init_arrays(self,
                     n_shots: int,
                     num_area: int,
@@ -27,6 +25,6 @@ class ProcessorState:
                     asp: int):
         self.indices = np.arange(n_shots)
         self.cbck = np.zeros((num_area, n_shots, 2 * asp, 2 * asp), dtype=np.float32)
-        self.speed = np.zeros(mean)
+        self.speed = np.zeros(n_shots)
         self.heading = np.zeros(mean)
-        self.cog = np.zeros(mean)
+        self.cog = np.zeros(n_shots)
