@@ -5,8 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
-# MY_IP   = '192.168.192.185'
-MY_IP = '127.0.0.1'
+MY_IP   = '192.168.192.185'
+# MY_IP = '127.0.0.1'
 IN_PORT = 4000
 
 N_FREQS   = 64    # spec_1d frequency bins
@@ -44,7 +44,8 @@ N_DISPLAY = round(F_DISPLAY / F_MAX * N_FREQ_2D)
 # [21] H  wind_dir
 # [22] B  n_sys
 # [23] B  quality  (0=BAD, 1=GOOD)
-# [24-27] H×4  reserved
+# [24] H  algo_version  (1 = текущая версия алгоритма)
+# [25-27] H×3  reserved
 _HDR_FMT  = "<BBHHHHHHHHHHHHHHHHHHHHBBHHHH"
 _HDR_SIZE = struct.calcsize(_HDR_FMT)                     # 52 bytes
 _PKT_SIZE = _HDR_SIZE + N_FREQS + N_FREQ_2D * N_DIRS      # 52+64+1296 = 1412 bytes
@@ -172,8 +173,9 @@ def _decode(data: bytes):
         'wspd':     un[20] / 10.0,
         'wind_dir': un[21],
         # misc
-        'ide_sys':  un[22],
-        'quality':  un[23],
+        'ide_sys':      un[22],
+        'quality':      un[23],
+        'algo_version': un[24],
         # spectra
         'spec_1d':  spec_1d,
         'spec_2d':  spec_2d,

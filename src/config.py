@@ -26,11 +26,12 @@ class Constants:
     # ── Algorithm & protocol version — hardcoded, NOT in config ───────────────
     # Changing these requires a matching update to tester_receive.py (N_FREQ, N_DIRS)
     # and recalibration of SNR_A/B (K_NUM). Edit here and in batch_process.py together.
-    N_FREQ:    int = 64
-    N_DIRS:    int = 36
-    K_NUM:     int = 32
-    NUM_AREA:  int = 8
-    N_FREQ_2D: int = 36
+    N_FREQ:       int = 64
+    N_DIRS:       int = 36
+    K_NUM:        int = 32
+    NUM_AREA:     int = 8
+    N_FREQ_2D:    int = 36
+    ALGO_VERSION: int = 1   # increment when algorithm behaviour changes
 
 
 @dataclass(frozen=True)

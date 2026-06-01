@@ -14,13 +14,14 @@ class OutputSink:
 
 
 class UdpOutputSink(OutputSink):
-    def __init__(self, server_ip, server_port, n_freqs, n_dirs, n_freq_2d):
+    def __init__(self, server_ip, server_port, n_freqs, n_dirs, n_freq_2d, algo_version=1):
         self.out_socket = create_out_socket(server_port, 2)
         self.server_ip = server_ip
         self.server_port = server_port
         self.n_freqs = n_freqs
         self.n_dirs = n_dirs
         self.n_freq_2d = n_freq_2d
+        self.algo_version = algo_version
 
     def send(self, result: ProcessResult):
         o = result.output
@@ -29,7 +30,7 @@ class UdpOutputSink(OutputSink):
         #   HHHHH                   — summary: swh, t_p, t_m, dir_p, dir_m
         #   HHH HHH HHH             — wind/sw1/sw2: swh, t_p, dir_p each
         #   H H HH                  — curr_speed, curr_dir, wspd_x10, wind_dir
-        #   BB HHHH                 — n_sys, quality, reserved×4
+        #   BB HHHH                 — n_sys, quality, algo_version, reserved×3
         data = pack(
             f"<BBHHHHHHHHHHHHHHHHHHHHBBHHHH"
             f"{self.n_freqs}B{self.n_freq_2d * self.n_dirs}B",
@@ -52,7 +53,7 @@ class UdpOutputSink(OutputSink):
             int(np.clip(round(getattr(o, 'wspd', 0.0) * 10), 0, 65535)),
             int(round(getattr(o, 'wind_dir', 0.0))) % 360,
             o.ide_sys, o.n_dis,
-            0, 0, 0, 0,
+            self.algo_version, 0, 0, 0,
             *o.spec_1d,
             *o.spec_2d.flatten(),
         )

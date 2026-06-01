@@ -39,6 +39,7 @@ def _build_sinks(cfg):
             cfg.const.N_FREQ,
             cfg.const.N_DIRS,
             cfg.const.N_FREQ_2D,
+            cfg.const.ALGO_VERSION,
         ))
     if cfg.output.get("file", "false") == "true":
         sinks.append(CSVOutputSink(cfg.output["save_path"], cfg.const))
