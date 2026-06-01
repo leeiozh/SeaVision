@@ -5,7 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
-SERVER_IP = '127.0.0.1'
+# SERVER_IP = '192.168.192.185'
+MY_IP = '127.0.0.1'
 IN_PORT = 4000
 
 N_FREQS   = 64    # N_FREQ  from config.ini
@@ -231,7 +232,7 @@ def _update(fig, ax1, line1d, fill1d, ax2, pcm, dir_lines, info, d: dict):
 
 if __name__ == '__main__':
     IN_SOCK = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    IN_SOCK.bind((SERVER_IP, IN_PORT))
+    IN_SOCK.bind((MY_IP, IN_PORT))
 
     fig, ax1, line1d, fill1d, ax2, pcm, dir_lines, info = _setup()
     while True:

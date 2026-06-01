@@ -28,7 +28,7 @@ class UdpInputSource(InputSource):
         self.navi_socket = create_inp_socket(my_ip, navi_port, 2)
         self.navi_socket.setblocking(False)
         self.curr_bck = BackData(step=1.875, pulse=0, bck=np.zeros((aap, ardp), dtype=np.uint8))
-        self.curr_navi = None
+        self.curr_navi = Navi(hdg=0.0, cog=0.0, spd=0.0, sog=0.0, lat=0.0, lon=0.0)
         self.double_counter = 0
         self.ready_vec = np.zeros(aap, dtype=bool)
 
@@ -155,13 +155,15 @@ class UdpInputSource(InputSource):
                 continue
 
         n_recv = int(np.sum(part1_seen))
-        self.curr_bck.n_received = n_recv
         if n_recv < n:
             pct = 100.0 * n_recv / n
             print()
             log.warning(
                 f'Frame incomplete: {n_recv}/{n} lines ({pct:.0f}%) — packet loss.')
-        return self.curr_bck
+        # Return a copy: the next get_bck() call immediately overwrites self.curr_bck.bck
+        # with new frame data while the previous frame may still be in the processing queue.
+        return BackData(self.curr_bck.step, self.curr_bck.pulse,
+                        self.curr_bck.bck.copy(), n_recv)
 
     def close(self):
         self.back_socket.close()

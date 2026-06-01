@@ -1,7 +1,5 @@
 import numpy as np
 from scipy.interpolate import interp1d
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 import logging as _logging
 _log = _logging.getLogger(__name__)
@@ -48,6 +46,8 @@ def _save_debug_pic(
     """Single diagnostic figure combining 1D spectrum, polar directional spectrum,
     ω-k portrait and parameter table.  Mirrors batch_process._save_pic."""
     import os
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.gridspec import GridSpec
 
     out_path = path if path.endswith('.png') else os.path.join(path, 'debug_combined.png')
@@ -257,6 +257,8 @@ def _save_debug_segments(cbck, raw_ports, raw_spec3ds, azimuths, k_max, om_max, 
     port_vmax = max(float(p.max()) for p in raw_ports)
     port_vmax = max(port_vmax, 1e-9)
 
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib import cm as mpl_cm
     from matplotlib.colors import Normalize
     norm_port = Normalize(vmin=0, vmax=port_vmax)
@@ -322,6 +324,8 @@ def _save_debug_portrait(port_fixed, step, asp, k_num, om_max,
                       encodes system identity.
     """
     import os
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
     out_path = (path if path.endswith('.png')
                 else os.path.join(path, 'debug_portrait.png'))
 
@@ -414,6 +418,8 @@ def _save_debug_freq_spec(s_omega_pre, omega_vals, freq_peaks, systems_draft, pa
     show the attributed band.  Period annotation next to each line.
     """
     import os
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
     out_path = (path if path.endswith('.png')
                 else os.path.join(path, 'debug_freq_spec.png'))
 
@@ -473,6 +479,8 @@ def _save_debug_spec2d(s_om_th, omega_vals, wave_sum, sys_dict,
     Coloured crosses: pre-analysis systems_draft location (dir × ω).
     """
     import os
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
     out_path = (path if path.endswith('.png')
                 else os.path.join(path, 'debug_spec2d.png'))
 
@@ -577,8 +585,6 @@ class Processor:
             row0 = bck[y, x] * (1.0 - wx) + bck[y, x + 1] * wx
             row1 = bck[y + 1, x] * (1.0 - wx) + bck[y + 1, x + 1] * wx
             s.cbck[i, t] = row0 * (1.0 - wy) + row1 * wy
-
-        s.indices = np.roll(s.indices, -1)
 
         result   = None
         port_out = None
@@ -752,9 +758,9 @@ class Processor:
                     wspd=wspd, wind_sig=ring_sig, pulse=s.curr_pulse, n_sys=sys["n_sys"], path=_pics,
                 )
 
-            self.averager.push(wave_out, spec_1d, spec_2d, port_fixed)
+            self.averager.push(wave_out, port_fixed)
 
-            result, spec_1d, spec_2d, port_out = self.averager.get_mean(
+            result, port_out = self.averager.get_mean(
                 pulse=s.curr_pulse, step=s.curr_step, rpm=cst.RPM,
                 n_shots=cst.N_SHOTS, asp=cst.ASP, adp=cst.ADP,
             )

@@ -5,14 +5,8 @@ excludes = [
     'tkinter', '_tkinter', 'Tkinter',
     'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
     'wx', 'gi', 'gtk',
-    # matplotlib backends кроме agg
-    'matplotlib.backends.backend_qt5agg',
-    'matplotlib.backends.backend_qt4agg',
-    'matplotlib.backends.backend_tkagg',
-    'matplotlib.backends.backend_wxagg',
-    'matplotlib.backends.backend_gtk3agg',
-    'matplotlib.backends.backend_webagg',
-    'matplotlib.backends._backend_tk',
+    # matplotlib — только для дебага (pics=false в штатной работе)
+    'matplotlib',
     # тяжёлые пакеты, не нужны для main.py
     'pandas',
     'xarray',
@@ -29,7 +23,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],           # config.ini остаётся рядом с exe
+    datas=[],           # config.ini кладётся рядом с exe после установки
     hiddenimports=[
         'scipy.special.cython_special',
         'scipy.signal',
@@ -37,7 +31,6 @@ a = Analysis(
         'scipy.interpolate',
         'netCDF4',
         'cftime',
-        'matplotlib.backends.backend_agg',
     ],
     hookspath=[],
     hooksconfig={},
@@ -51,14 +44,12 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
+    exclude_binaries=True,   # onedir: dll-файлы лежат рядом, не внутри exe
     name='seavision',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,        # strip не поддерживается на Windows
-    upx=False,          # UPX может отсутствовать на сервере сборки
+    strip=False,
+    upx=False,
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -66,4 +57,14 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon='sv.ico',
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    name='seavision',        # → dist/seavision/ — вся эта папка и есть дистрибутив
 )

@@ -76,29 +76,22 @@ class CSVOutputSink(OutputSink):
     def __init__(self, save_path, constants):
         self.save_path = save_path
         now_time = datetime.now()
-        self.time = now_time.strftime("%Y%m%dT%H%M%S")
-        self.path_port = self.save_path + self.time + "_port.csv"
-        self.path_spec = self.save_path + self.time + "_spec.csv"
-        self.path_navi = self.save_path + self.time + "_navi.csv"
-        self.path_params = self.save_path + self.time + "_params.csv"
+        ts = now_time.strftime("%Y%m%dT%H%M%S")
         self.k_num = constants.K_NUM
-        self.rpm = constants.RPM
-        self.mean = constants.MEAN
         self.n_freq = constants.N_FREQ
         self.n_shots = constants.N_SHOTS
         self.n_dirs = constants.N_DIRS
 
-        with open(self.path_params, "w") as out:
-            out.write("datetime;pulse;step;swh;t_p;d_p;d_m;t_m;freq;\n")
+        # Keep file handles open — avoids repeated open/close churn on every result
+        self._f_params = open(save_path + ts + "_params.csv", "w", buffering=1)
+        self._f_port   = open(save_path + ts + "_port.csv",   "w", buffering=1)
+        self._f_spec   = open(save_path + ts + "_spec.csv",   "w", buffering=1)
+        self._f_navi   = open(save_path + ts + "_navi.csv",   "w", buffering=1)
 
-        with open(self.path_port, "w") as out:
-            out.write(f"({self.n_shots},{self.k_num})\n")
-
-        with open(self.path_spec, "w") as out:
-            out.write(f"({self.n_dirs},{self.n_freq})\n")
-
-        with open(self.path_navi, "w") as out:
-            out.write("datetime,lat,lon,spd,sog,cog,hdg\n")
+        self._f_params.write("datetime;pulse;step;swh;t_p;d_p;d_m;t_m;freq;\n")
+        self._f_port.write(f"({self.n_shots},{self.k_num})\n")
+        self._f_spec.write(f"({self.n_dirs},{self.n_freq})\n")
+        self._f_navi.write("datetime,lat,lon,spd,sog,cog,hdg\n")
 
     def send(self, result: ProcessResult):
         o = result.output
@@ -110,26 +103,30 @@ class CSVOutputSink(OutputSink):
         self._save_navi(dtime, result.navi)
 
     def _save_params(self, dtime, pulse: int, step: float, wave: Wave, freq: np.ndarray):
-        with open(self.path_params, "a") as f:
-            f.write(dtime + f";{pulse};{step};" + wave.print())
-            for v in freq:
-                f.write(f"{v:.0f};")
-            f.write("\n")
+        self._f_params.write(dtime + f";{pulse};{step};" + wave.print())
+        for v in freq:
+            self._f_params.write(f"{v:.0f};")
+        self._f_params.write("\n")
 
     def _save_port(self, port: np.ndarray):
-        with open(self.path_port, "a") as f:
-            for row in port:
-                f.write(";".join(f"{v:.0f}" for v in row))
-                f.write(";\n")
-            f.write("\n")
+        for row in port:
+            self._f_port.write(";".join(f"{v:.0f}" for v in row))
+            self._f_port.write(";\n")
+        self._f_port.write("\n")
 
     def _save_spec(self, spec: np.ndarray):
-        with open(self.path_spec, "a") as f:
-            for row in spec:
-                f.write(";".join(f"{v:.0f}" for v in row))
-                f.write(";\n")
-            f.write("\n")
+        for row in spec:
+            self._f_spec.write(";".join(f"{v:.0f}" for v in row))
+            self._f_spec.write(";\n")
+        self._f_spec.write("\n")
 
     def _save_navi(self, dtime, navi: Navi):
-        with open(self.path_navi, "a") as f:
-            f.write(f"{dtime},{navi.lat},{navi.lon},{navi.spd},{navi.sog},{navi.cog},{navi.hdg}\n")
+        self._f_navi.write(
+            f"{dtime},{navi.lat},{navi.lon},{navi.spd},{navi.sog},{navi.cog},{navi.hdg}\n")
+
+    def close(self):
+        for f in (self._f_params, self._f_port, self._f_spec, self._f_navi):
+            try:
+                f.close()
+            except Exception:
+                pass

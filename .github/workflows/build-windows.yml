@@ -33,5 +33,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: seavision-windows-x64
-          path: dist/seavision.exe
+          path: dist/seavision/       # вся папка onedir: exe + dll-файлы
           retention-days: 30

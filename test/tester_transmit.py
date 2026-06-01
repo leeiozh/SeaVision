@@ -5,7 +5,8 @@ import time
 import numpy as np
 from netCDF4 import Dataset
 
-NETCDF_FILE = "/media/leeiozh/EZH/DATA/old_radar_data/0606_4392.nc"
+NETCDF_FILE = "/media/leeiozh/EZH/DATA/old_radar_data/0606_4338.nc"
+# SERVER_IP = '192.168.192.201'
 SERVER_IP = '127.0.0.1'
 PRLI_PORT = 4001
 NAVI_PORT = 4002
@@ -22,7 +23,7 @@ ASP = 192    # AREA_SIZE_PX    — half-width of the processing window
 # Fix: sleep LINE_SLEEP seconds after each azimuth line (= after 2 packets).
 # At 200 µs/line: send time ≈ 410 ms, well within ROTATION_SLEEP.
 # Permanent OS fix: sudo sysctl -w net.core.rmem_max=33554432
-LINE_SLEEP = 0.0001   # 100 µs between lines; keeps send rate ~13k pkt/s < kernel buffer limit
+LINE_SLEEP = 0.00015   # 100 µs between lines; keeps send rate ~13k pkt/s < kernel buffer limit
                       # (default rmem_max ≈ 413 packets; 100µs → buffer at ~13%, no drops)
                       # For 0 sleep: sudo sysctl -w net.core.rmem_max=33554432 first
 
