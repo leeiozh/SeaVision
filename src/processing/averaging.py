@@ -7,13 +7,13 @@ _ZERO_WAVE = Wave()
 class Averager:
     """Accumulates and averages processing outputs over MEAN frames."""
 
-    def __init__(self, mean: int, n_freq: int, n_dirs: int, n_shots: int, cut_num: int):
+    def __init__(self, mean: int, n_freq: int, n_freq_2d: int, n_dirs: int, n_shots: int, cut_num: int):
         self.n_dirs = n_dirs
         self.mean = mean
 
         # List comprehension — each WaveOutput is a distinct object, not mean aliases
         self.outputs = [WaveOutput(1, Wave(), Wave(), Wave(), Wave(),
-                                   np.zeros(n_freq), np.zeros((n_dirs, n_freq)))
+                                   np.zeros(n_freq), np.zeros((n_dirs, n_freq_2d)))
                         for _ in range(mean)]
         self.port = np.zeros((mean, n_shots, cut_num))
         self.index = 0

@@ -39,11 +39,11 @@ from src.algorithms.partition import (calc_wspd, calc_partitions,
 from src.runtime.logger import setup_logger
 
 _SIGNAL_BAND  = 10    # must match processor.py
-_MAX_CURRENT  = 2.55  # physical clip for ocean current [m/s]
+_MAX_CURRENT  = 3.0   # physical clip for ocean current [m/s]
 
-# Quality thresholds — hardcoded, same as processor.py
+# Quality thresholds — algorithm version constants, same as processor.py
+# WIND_SIG_MIN is installation-dependent and read from cst.WIND_SIG_MIN
 _SNR_QUALITY_MIN = 5.0
-_WIND_SIG_MIN    = 5.5
 _T_PEAK_MIN      = 5.5
 
 _F_DISPLAY   = 0.20   # Hz — radial limit on polar spectrum display
@@ -836,14 +836,14 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
 
         quality = int(
             snr_tot    >= _SNR_QUALITY_MIN
-            and wind_sig   >= _WIND_SIG_MIN
+            and wind_sig   >= cst.WIND_SIG_MIN
             and T_peak     >= _T_PEAK_MIN
             and sys["n_sys"] >= 1
         )
         if not quality:
             reasons = []
             if snr_tot       < _SNR_QUALITY_MIN: reasons.append(f'snr={snr_tot:.2f}<{_SNR_QUALITY_MIN}')
-            if wind_sig      < _WIND_SIG_MIN:    reasons.append(f'ring_sig={wind_sig:.2f}<{_WIND_SIG_MIN}')
+            if wind_sig      < cst.WIND_SIG_MIN: reasons.append(f'ring_sig={wind_sig:.2f}<{cst.WIND_SIG_MIN}')
             if T_peak        < _T_PEAK_MIN:      reasons.append(f'T_peak={T_peak:.2f}<{_T_PEAK_MIN}')
             if sys["n_sys"]  < 1:                reasons.append('n_sys=0')
             msg = f'[quality] {name}: BAD  [{", ".join(reasons)}]'

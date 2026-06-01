@@ -14,55 +14,45 @@ class OutputSink:
 
 
 class UdpOutputSink(OutputSink):
-    def __init__(self, server_ip, server_port, n_freqs, num_area):
+    def __init__(self, server_ip, server_port, n_freqs, n_dirs, n_freq_2d):
         self.out_socket = create_out_socket(server_port, 2)
         self.server_ip = server_ip
         self.server_port = server_port
         self.n_freqs = n_freqs
-        self.num_area = num_area
+        self.n_dirs = n_dirs
+        self.n_freq_2d = n_freq_2d
 
     def send(self, result: ProcessResult):
         o = result.output
-        # un[7]  (was n_area=384)   → curr_dir, integer degrees 0-360
-        # un[11] (was max_sys=3)    → curr_speed, uint8 cm/s, clipped to 255
-        # un[26] (vco, signed int16) → reserved / 0
-        # un[27] H (NEW)            → wind_dir, integer degrees 0-360
-        # un[28] H (NEW)            → wspd × 10 (0.1 m/s resolution)
-        _curr_dir = int(round(getattr(o, 'curr_dir', 0.0))) % 360
-        _curr_spd_b = int(np.clip(round(getattr(o, 'curr_speed', 0.0) * 100), 0, 255))
-        _wind_dir = int(round(getattr(o, 'wind_dir', 0.0))) % 360
-        _wspd10 = int(np.clip(round(getattr(o, 'wspd', 0.0) * 10), 0, 65535))
+        # Header layout (52 bytes):
+        #   BB HH                   — type, pulse, step_mm, rpm_x100
+        #   HHHHH                   — summary: swh, t_p, t_m, dir_p, dir_m
+        #   HHH HHH HHH             — wind/sw1/sw2: swh, t_p, dir_p each
+        #   H H HH                  — curr_speed, curr_dir, wspd_x10, wind_dir
+        #   BB HHHH                 — n_sys, quality, reserved×4
         data = pack(
-            f"<BBHHBBHHHHHBBHHHHHHHHHHHHHhHH{self.n_freqs}B{self.n_freqs * self.num_area}B",
-            5,
-            o.pulse,
-            round(o.step * 1000),
-            round(o.rps * 100),  # [3]  rps (restored)
-            o.n_in_win,
-            o.n_wins,
-            round(o.step_area * 1000),  # [6]  step_area (restored)
-            _curr_dir,  # [7]  curr_dir [°], was n_area
-            o.n_start,
-            round(o.cog_proc * 100),
-            round(o.sog_proc * 100),
-            _curr_spd_b,  # [11] curr_speed [cm/s], was max_sys
-            o.ide_sys,
-            round(o.wave_sum.swh * 100),
-            round(o.wave_sum.d_p * 100),
-            round(o.wave_sum.t_p * 100),
-            round(o.wave_win.swh * 100),
-            round(o.wave_win.d_p * 100),
-            round(o.wave_win.t_p * 100),
-            round(o.wave_sw1.swh * 100),
-            round(o.wave_sw1.d_p * 100),
-            round(o.wave_sw1.t_p * 100),
-            round(o.wave_sw2.swh * 100),
-            round(o.wave_sw2.d_p * 100),
-            round(o.wave_sw2.t_p * 100),
-            o.n_dis,
-            0,  # [26] reserved (was vco/u_proj)
-            _wind_dir,  # [27] wind_dir [°] (NEW)
-            _wspd10,  # [28] wspd × 10 [0.1 m/s] (NEW)
+            f"<BBHHHHHHHHHHHHHHHHHHHHBBHHHH"
+            f"{self.n_freqs}B{self.n_freq_2d * self.n_dirs}B",
+            5, o.pulse,
+            round(o.step * 1000), round(o.rps * 100),
+            # summary — all 5 fields
+            round(o.wave_sum.swh * 100), round(o.wave_sum.t_p * 100), round(o.wave_sum.t_m * 100),
+            int(round(o.wave_sum.d_p)) % 360, int(round(o.wave_sum.d_m)) % 360,
+            # wind wave — swh, t_p, dir_p only
+            round(o.wave_win.swh * 100), round(o.wave_win.t_p * 100),
+            int(round(o.wave_win.d_p)) % 360,
+            # swell 1 — swh, t_p, dir_p only
+            round(o.wave_sw1.swh * 100), round(o.wave_sw1.t_p * 100),
+            int(round(o.wave_sw1.d_p)) % 360,
+            # swell 2 — swh, t_p, dir_p only
+            round(o.wave_sw2.swh * 100), round(o.wave_sw2.t_p * 100),
+            int(round(o.wave_sw2.d_p)) % 360,
+            round(getattr(o, 'curr_speed', 0.0) * 100),
+            int(round(getattr(o, 'curr_dir', 0.0))) % 360,
+            int(np.clip(round(getattr(o, 'wspd', 0.0) * 10), 0, 65535)),
+            int(round(getattr(o, 'wind_dir', 0.0))) % 360,
+            o.ide_sys, o.n_dis,
+            0, 0, 0, 0,
             *o.spec_1d,
             *o.spec_2d.flatten(),
         )
@@ -77,20 +67,23 @@ class CSVOutputSink(OutputSink):
         self.save_path = save_path
         now_time = datetime.now()
         ts = now_time.strftime("%Y%m%dT%H%M%S")
+        inst = getattr(constants, "installation_id", "")
+        prefix = f"{inst}_{ts}" if inst and inst != "default" else ts
         self.k_num = constants.K_NUM
         self.n_freq = constants.N_FREQ
+        self.n_freq_2d = constants.N_FREQ_2D
         self.n_shots = constants.N_SHOTS
         self.n_dirs = constants.N_DIRS
 
         # Keep file handles open — avoids repeated open/close churn on every result
-        self._f_params = open(save_path + ts + "_params.csv", "w", buffering=1)
-        self._f_port   = open(save_path + ts + "_port.csv",   "w", buffering=1)
-        self._f_spec   = open(save_path + ts + "_spec.csv",   "w", buffering=1)
-        self._f_navi   = open(save_path + ts + "_navi.csv",   "w", buffering=1)
+        self._f_params = open(save_path + prefix + "_params.csv", "w", buffering=1)
+        self._f_port   = open(save_path + prefix + "_port.csv",   "w", buffering=1)
+        self._f_spec   = open(save_path + prefix + "_spec.csv",   "w", buffering=1)
+        self._f_navi   = open(save_path + prefix + "_navi.csv",   "w", buffering=1)
 
         self._f_params.write("datetime;pulse;step;swh;t_p;d_p;d_m;t_m;freq;\n")
         self._f_port.write(f"({self.n_shots},{self.k_num})\n")
-        self._f_spec.write(f"({self.n_dirs},{self.n_freq})\n")
+        self._f_spec.write(f"({self.n_dirs},{self.n_freq_2d})\n")
         self._f_navi.write("datetime,lat,lon,spd,sog,cog,hdg\n")
 
     def send(self, result: ProcessResult):

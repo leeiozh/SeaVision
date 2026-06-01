@@ -4,7 +4,7 @@ import numpy as np
 _MULTI_DIR_HALF_DEG = 45.0   # half-width of directional cone per system [deg]
 _MULTI_MIN_CELLS    = 5      # min spectral cells per system to enter regression
 _MULTI_MIN_SV_RATIO = 0.05   # min σ_min/σ_max for 2×2 solve (ill-cond. guard)
-_MULTI_MAX_CURRENT  = 2.55   # physical clip for residual current [m/s]
+_MULTI_MAX_CURRENT  = 3.0    # physical clip for residual current [m/s]
 _MULTI_K_MIN_REL    = 0.08   # min k / k_max for a cell to be used in regression;
                               # very long swell (k → 0) gives Δω = k·U → 0 and
                               # contributes only noise to the regression

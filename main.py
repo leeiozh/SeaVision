@@ -1,3 +1,4 @@
+import sys
 from time import sleep
 from src.config import load_config
 from src.runtime.manager import Manager
@@ -37,6 +38,7 @@ def _build_sinks(cfg):
             int(cfg.output["server_port"]),
             cfg.const.N_FREQ,
             cfg.const.N_DIRS,
+            cfg.const.N_FREQ_2D,
         ))
     if cfg.output.get("file", "false") == "true":
         sinks.append(CSVOutputSink(cfg.output["save_path"], cfg.const))
@@ -45,8 +47,9 @@ def _build_sinks(cfg):
 
 def main():
     log = setup_logger("main")
-    cfg = load_config("config.ini")
-    log.info("Config loaded")
+    config_path = sys.argv[1] if len(sys.argv) > 1 else "config.ini"
+    cfg = load_config(config_path)
+    log.info(f"Config: {config_path}")
 
     source = _build_source(cfg)
     log.info(f"Input: {type(source).__name__}")

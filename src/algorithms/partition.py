@@ -157,7 +157,7 @@ def calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh):
 
     Returns dict:
       { "n_sys": int,
-        "w_s":  {"h_s", "t_p", "t_m", "d_p", "d_m"} or None,
+        "w_s":  {"h_s", "t_p", "d_p"} or None,
         "sw_1": { … } or None,
         "sw_2": { … } or None }
     """
@@ -232,14 +232,7 @@ def calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh):
         if frac < _PART_MIN_ENERGY_FRAC:
             continue
 
-        s1d_sum = float(s1d_preblank.sum())
-        if s1d_sum > 0 and np.any(omega_vals > 0):
-            om_mean = float(np.dot(s1d_preblank, omega_vals[:n_om])) / s1d_sum
-            t_m = float(2 * np.pi / om_mean) if om_mean > 0 else t_p
-        else:
-            t_m = t_p
-
-        systems.append({"frac": frac, "t_p": t_p, "t_m": t_m, "d_p": d_p, "d_m": d_p})
+        systems.append({"frac": frac, "t_p": t_p, "d_p": d_p})
 
     if not systems:
         return {"n_sys": 0, "w_s": None, "sw_1": None, "sw_2": None}

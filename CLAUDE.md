@@ -14,8 +14,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Активация виртуального окружения (Python 3.12)
 source sv_env/bin/activate
 
-# Запуск основного процессора (конфиг захардкожен в main.py как "config.ini")
-python main.py
+# Запуск основного процессора
+python main.py                   # использует config.ini по умолчанию
+python main.py config_debug.ini  # явный путь к конфигу (NC-источник, N_SHOTS=64, pics=./)
 
 # Визуализация выхода (отдельный терминал, UDP порт 4000)
 python test/tester_receive.py
@@ -23,27 +24,25 @@ python test/tester_receive.py
 # Генерация тестового UDP-потока для отладки без радара
 python test/tester_transmit.py
 
-# Пакетная обработка NetCDF-файлов (без усреднения, первые N_SHOTS кадров каждого)
+# Пакетная обработка NetCDF-файлов
 python batch_process.py [--csv META_upd2.csv] [--base-path /storage/thalassa/DATA/RADAR/] [--out batch_out] [--config config.ini]
-# CSV: любые столбцы + 'name' с путями к .nc; --base-path — префикс к каждому пути
-# вывод: {out}/params.csv + {out}/spec/{name}_freqspec.npy / _dirspec.npy + {out}/pics/{name}.png
 
 # Параллельная пакетная обработка (multiprocessing или SLURM)
-python batch_process_parallel.py --n-workers 8   # локальный режим
-python batch_process_parallel.py --task-id $SLURM_ARRAY_TASK_ID --n-tasks $SLURM_ARRAY_TASK_COUNT  # SLURM
-python batch_process_parallel.py --merge-only --out batch_out   # слияние partial CSV после SLURM
-# run_batch.sh — SLURM sbatch-скрипт (48 воркеров, партиция r2c2)
+python batch_process_parallel.py --n-workers 8
+python batch_process_parallel.py --task-id $SLURM_ARRAY_TASK_ID --n-tasks $SLURM_ARRAY_TASK_COUNT
+python batch_process_parallel.py --merge-only --out batch_out
+
+# Сборка Windows .exe через GitHub Actions
+# → push в origin/main или ручной запуск workflow "Build Windows EXE"
+# → скачать артефакт seavision-windows-x64 → положить config.ini рядом с seavision.exe
 
 # Диагностика мультиволнового пайплайна на одном NC-файле
 python debug_multiwave.py   # путь NC захардкожен внутри, вывод → ./debug_out/
-
-# Сборка в .exe (PyInstaller)
-pyinstaller main.py --onedir
 ```
 
 Нет системы тестов и линтера — тестирование через `tester_receive.py` с живыми данными или файлами.
 
-`test/tester_receive.py` и `test/tester_transmit.py` — канонические; в корне репозитория лежат их копии (не синхронизируются).
+`test/tester_receive.py` и `test/tester_transmit.py` — канонические.
 
 ## Архитектура потока данных
 
@@ -57,422 +56,294 @@ Processor.update()          ← основная логика
 Averager.push() → Averager.get_mean() → Output
     ↓
 UdpOutputSink / CSVOutputSink
-    ↓  UDP пакет 2420 байт  /  4 CSV файла с timestamp
+    ↓  UDP пакет 1412 байт  /  4 CSV файла с timestamp
 test/tester_receive.py      ← визуализация
 ```
 
-`out_times` в `[output]` — каждые сколько кадров вызывать расчёт спектра (default 32). Расчёт запускается при `s.index >= N_SHOTS and s.index % out_times == 0`; до этого `update()` только заполняет буфер `cbck`. `Averager` усредняет до последних `MEAN` расчётов; вывод начинается с первого накопленного результата (не ждёт MEAN).
+`out_times` в `[output]` — каждые сколько кадров вызывать расчёт спектра (default 32). Расчёт запускается при `s.index >= N_SHOTS and s.index % out_times == 0`.
 
 ## Manager: модель устойчивости
-
-Три потока: Input → Process → Output, связаны через `in_queue` и `out_queue`.
 
 | Событие | Реакция |
 |---|---|
 | Input timeout / EOF | silent wait; после `N_SHOTS × rot_period` с молчания → `_reset_pending = True` |
-| Data resumed | перезапуск processor перед подачей новых данных, `_reset_pending = False` |
+| Data resumed | перезапуск processor перед подачей новых данных |
 | Processing exception | немедленный `_restart_processor()` |
 | Processor hang > `10 × rot_period` | watchdog → `_restart_processor()` |
 | Output sink error | логируется per-sink, остальные sinks продолжают работу |
-
-При перезапуске processor: drain `in_queue`, пересоздать `Processor` через `processor_factory`, запустить новый `t_proc`.
 
 ## Источники входных данных
 
 | Тип (config `type=`) | Класс | Описание |
 |---|---|---|
-| `udp` | `UdpInputSource` | Живой радар. Принимает пакеты по 1032 байт, собирает AAP строк → один `BackData`. Дублирование строк (`double_counter ≥ 4`) принудительно завершает сбор кадра. |
-| `nc` | `NCInputSource` | NetCDF-файл с историческими данными (путь: `data_path`). |
-| `bt8` | `BT8InputSource` | Папка с бинарными BT8-файлами (путь: `bt8_folder`, индексы `bt8_start`/`bt8_end`, код импульса `bt8_pulse`). |
+| `udp` | `UdpInputSource` | Живой радар. Принимает пакеты по 1032 байт, собирает AAP строк → один `BackData`. **`get_bck()` возвращает копию** `bck`-массива (защита от гонки данных между Input и Process потоками). |
+| `nc` | `NCInputSource` | NetCDF-файл. `back.step = 0.0` = признак EOF. |
+| `bt8` | `BT8InputSource` | Папка с бинарными BT8-файлами. |
 
-`UdpInputSource.get_bck()` таймаут: `overall_timeout=30` с, `per_recv_timeout=2` с на каждый recv.
+`UdpInputSource` таймауты: `overall_timeout=30` с, `per_recv_timeout=2` с.
+`curr_navi` инициализируется дефолтным `Navi(0,0,0,0,0,0)` — не `None`.
 
-`NCInputSource` возвращает `back.step = 0.0` при исчерпании файла — это признак конца данных. В `batch_process.py` range resolution захардкожен как `step = 1.875` м/пкс; `UdpInputSource` и `BT8InputSource` берут `step` из пакета.
+**Единицы нави-данных:** `sog` и `spd` — в **м/с**, `hdg`, `cog` — в градусах. Не конвертировать.
 
-**Единицы нави-данных:** `sog` и `spd` приходят в raw-пакете в см/с (знаменатель 100), в коде — **м/с**, конвертировать не нужно. `hdg`, `cog` — градусы (знаменатель 100).
-
-**COG в processor.py** — вычисляется как circular mean (через arctan2 от mean(sin), mean(cos)) по кольцевому буферу `s.cog` размера MEAN, чтобы избежать артефактов на границе 0°/360°. Аналогично batch_process.py.
+**COG в processor.py** — circular mean через `arctan2(mean(sin), mean(cos))` по буферу `s.cog` размера N_SHOTS.
 
 ## Ключевые алгоритмы
 
-### Методология обработки (актуальная, после рефакторинга мая–июня 2026)
+### Методология обработки
 
 **Шаги 1–2: накопление спектра**
 
-1. **Все NUM_AREA сегментов одновременно, без поворота** (`orient=0`).
-   Каждый сегмент — квадрат `2·ASP × 2·ASP` пикселей, центр на расстоянии `ADP` px под своим азимутом.
-   Азимуты: `np.linspace(0, 360, NUM_AREA, endpoint=False)`.
+1. Все NUM_AREA сегментов одновременно, без поворота. Каждый — квадрат `2·ASP × 2·ASP` px, центр на `ADP` px.
+2. 3D Welch FFT каждого сегмента → `spec_3d_i (N_SHOTS//2, 2·K_NUM, 2·K_NUM)`, усреднение по NUM_AREA.
 
-2. **3D Welch FFT каждого сегмента** → `spec_3d_i (N_SHOTS//2, 2·K_NUM, 2·K_NUM)`, усреднение по NUM_AREA → `spec_3d_corr`.
-   Механика `calc_spec3d`: пространственный `fft2` по осям (1,2) для каждого кадра → `welch` по временной оси (0) → берётся положительная половина (N_SHOTS//2 бинов).
+**Шаги 3–4: идентификация систем и оценка тока**
 
-**Шаги 3–4: идентификация волновых систем и оценка тока**
-
-3. **Pre-analysis на ship-corrected спектре:**
-   - `apply_doppler_3d_vec(spec_3d_corr, Ux_ship, Uy_ship)` → `spec_3d_ship`
-     где `Ux_ship = SOG·sin(COG)`, `Uy_ship = SOG·cos(COG)`.
-   - `find_freq_peaks(s_omega_pre, omega_vals)` → список пиков `{om, om_lo, om_hi}` из 1D MTF-спектра.
-   - `calc_spec2d(spec_3d_ship, ...)` → `s_om_th_pre`.
-   - `find_system_dirs(s_om_th_pre, freq_peaks, ...)` → `systems_draft` — список `{om, om_lo, om_hi, dir_deg}`.
-
-4. **Оценка вектора тока `(Ux, Uy)` — кажущаяся скорость в радарном фрейме = ток_воды + v_судна:**
-   - Если `len(systems_draft) >= 2`: **`calc_current_multiwave`** — двухпроходный МНК раздельно по
-     каждой системе (k-диапазон + угловой конус `±_MULTI_DIR_HALF_DEG=45°`), нормировка веса
-     по системе (равный вклад независимо от энергии).
-     Pass 1: argmax в широком окне `wide = max(band, n_om//4)` без prior → грубая оценка.
-     Pass 2: centroid в узком окне `±band` вокруг `ω_ref + kx·Ucx0 + ky·Ucy0` → точная оценка.
-     Широкое окно в Pass 1 позволяет захватить энергию при сильном токе (до ~2 м/с),
-     которую узкое окно вокруг `ω_ref` пропустило бы. Возвращает остаточный `(Ucx, Ucy)`;
-     `Ux = Ucx + Ux_ship`. При плохой обусловленности (sv_min/sv_max < `_MULTI_MIN_SV_RATIO`)
-     возвращает `(None, None)` → fallback.
-   - Иначе или при fallback: **`calc_current_vector`** — двухпроходной argmax+centroid по
-     всем валидным `(kx, ky)` ячейкам. Pass 1 — argmax в широком окне, инициализация от
-     `(Ux_ship, Uy_ship)`; Pass 2 — centroid в узком окне `_SIGNAL_BAND`.
+3. Pre-analysis: `apply_doppler_3d_vec(spec_3d_corr, Ux_ship, Uy_ship)` → `spec_3d_ship` → `find_freq_peaks` → `find_system_dirs` → `systems_draft`.
+4. Ток: если `len(systems_draft) >= 2` → `calc_current_multiwave`; иначе → `calc_current_vector`. Клип: `_MAX_CURRENT = 3.0 м/с` и `_MULTI_MAX_CURRENT = 3.0 м/с`.
 
 **Шаги 5–11: финальный спектр и разбиение**
 
-5. **Векторная Допплер-коррекция** `apply_doppler_3d_vec(spec_3d_corr, k_max, Ux, Uy, om_max)`:
-   каждая ячейка `(kx, ky)` сдвигается на `Δω = kx·Ux + ky·Uy` — точно для любого числа волновых систем одновременно → `spec_3d_fixed`.
-
-6. **ω-k портрет** `port_fixed` из `spec_3d_fixed` через `calc_port`.
-
-7. **Разделение сигнал/шум**: полоса `±_SIGNAL_BAND=10 бинов` вокруг `ω = √(g·k)` — единый параметр для всех шагов.
-
-8. **MTF коррекция**: `k^{-1.2}`.
-
-9. **1D ω-спектр** из MTF-взвешенного сигнала → `T_peak`, `T_mean`, `m0`, `snr_tot`.
-
-10. **Направленный спектр** `s_om_th (N_DIRS, N_SHOTS//2)` из `spec_3d_fixed` через `calc_spec2d` с тем же `band=_SIGNAL_BAND`.
-    **`peak_dir` — математическая конвенция**: 0° = Восток (+X сегмента), 90° = Север, 180° = Запад, 270° = Юг.
-    Проекция скорости на направление волны: `u_proj = Ux·cos(peak_dir) + Uy·sin(peak_dir)`.
-    **Не использовать компасную формулу** `Ux·sin + Uy·cos` — sin/cos перепутаны.
-
-11. **Разбиение на системы** `calc_partitions` — итеративный поиск пиков в `s_om_th` с гашением.
-    Жёсткий кэп: `len(systems) >= 3 → break` в начале каждой итерации — гарантирует `n_sys ≤ 3`.
-    Классификация: система в пределах `±_PART_WIND_DIR_THRESH=45°` от wdir = ветровая (кратчайший T из кандидатов); нет кандидата → все = зыби.
-    Сохранение энергии: raw fracs нормируются → `h_s_i = swh·√(frac_norm_i)`, `Σ h_s_i² = swh²`.
-    **Порядок зыбей**: `swell_sys` сортируется по возрастанию T, поэтому `sw_1` = зыбь с наименьшим T (высокочастотная), `sw_2` = более длиннопериодная зыбь.
+5. `apply_doppler_3d_vec(spec_3d_corr, k_max, Ux, Uy, om_max)` → `spec_3d_fixed`.
+6. `calc_port(spec_3d_fixed)` → `port_fixed`.
+7. `separate_signal_noise`: полоса `±_SIGNAL_BAND=10 бинов` вокруг `ω = √(g·k)`.
+8. MTF: `k^{-1.2}`.
+9. 1D спектр → `T_peak`, `T_mean`, `m0`, `snr_tot`.
+10. `calc_spec2d(spec_3d_fixed, ...)` → `s_om_th`, `peak_dir`, `mean_dir`.
+11. `calc_partitions` → системы. Каждая система: `{h_s, t_p, d_p}` — **только пиковые значения**, средние не вычисляются. `wave_sum.t_m` и `wave_sum.d_m` вычисляются из 1D спектра и `calc_spec2d`, не из partitioning.
 
 ### Ток (течение)
-Координатная система сегмента (`orient=0`): строки (axis 0) идут с Запада на Восток, столбцы (axis 1) — с Юга на Север. После FFT:
-- **kx (axis 0) = Восток**, ky (axis 1) = Север
 
-`(Ux, Uy)` из `calc_current_vector` / `calc_current_multiwave` — кажущаяся скорость в координатах **(Восток, Север)**.
+`(Ux, Uy)` — кажущаяся скорость, **kx=Восток, ky=Север**.
 
-Истинный ток воды (вычитаем скорость судна, т.к. `(Ux,Uy) = v_curr + v_ship`):
 ```
-u_curr_East  = Ux − SOG · sin(COG)   # Восток
-u_curr_North = Uy − SOG · cos(COG)   # Север
-curr_speed   = hypot(u_curr_East, u_curr_North)
-curr_dir     = degrees(arctan2(u_curr_East, u_curr_North)) % 360
+u_curr_East  = Ux − SOG · sin(COG)
+u_curr_North = Uy − SOG · cos(COG)
+curr_speed   = hypot(u_curr_East, u_curr_North)   # клип 3.0 м/с
+curr_dir     = degrees(arctan2(u_curr_East, u_curr_North)) % 360   # КОМПАС
 ```
-→ `curr_speed` упаковывается в UDP слот `un[11]` как uint8 (`× 100`, clip 0–255 cm/s).
-→ `curr_dir` упаковывается в UDP слот `un[7]` в целых градусах.
 
-HDG не нужен: изображение не привязано к курсу судна.
-
-`SOG` и `COG` из `navi` — в **м/с** и **градусах** соответственно. Не умножать на коэффициенты пересчёта.
+→ `curr_speed` в UDP поле [18] uint16 ×100.
+→ `curr_dir` в UDP поле [19] целые градусы.
 
 ### Скорость ветра
 ```
 wspd = 0.01 · (WSPD_A + WSPD_B · ring_sig)   [м/с]
 ```
-`ring_sig` = std интенсивности бэкскаттера в кольце `ADP±ASP`. `WSPD_A`, `WSPD_B` — в `[constants]` конфига (множитель 0.01 в коде, поэтому `WSPD_A≈149` → ~1.49 м/с).
+`ring_sig` = std бэкскаттера в кольце `ADP±ASP`.
 
 ### SWH и SNR
-
 ```
-port_fixed = omega-k портрет Doppler-скорректированного spec_3d_fixed
-signal     = port_fixed, |ω_bin − ω_ref(k)| ≤ _SIGNAL_BAND
-noise      = port_fixed, |ω_bin − ω_ref(k)| >  _SIGNAL_BAND
-signal_mtf = signal · k^{-1.2}
-
-snr_tot    = ∬ signal_mtf dω dk  /  ∬ noise dω dk
-
-wave_sum.swh = 0.01 · (SNR_A + SNR_B · √snr_tot)   [м]
+snr_tot        = ∬ signal_mtf dω dk  /  ∬ noise dω dk
+wave_sum.swh   = 0.01 · (SNR_A + SNR_B · √snr_tot)   [м]
+h_s_i          = swh · √(frac_i / Σfrac_j)            # Σh_s_i² = swh²
 ```
-
-SNR_A и SNR_B подлежат перекалибровке при изменении band или схемы коррекции.
-
-Sub-системы в `calc_partitions`:
-```
-frac_raw_i  = sys_energy_i / total_energy          # до зануления пика
-frac_norm_i = frac_raw_i / Σ frac_raw_j            # нормировка → Σ frac_norm = 1
-h_s_i       = wave_sum.swh · √frac_norm_i          # Σ h_s_i² = swh²
-```
-
-### Направление ветра
-`calc_wspd(bck)` — аппроксимация `I(θ) = a + b·cos²(0.5·(θ−c))` по азимутальной средней интенсивности.
-Возвращает `(sig, wdir_deg)`, где `sig = mean(bck)` — среднее значение бэкскаттера всего изображения (≠ `ring_sig`). `wdir` передаётся в `calc_partitions()` только как ориентир классификации (система в пределах ±45° от wdir = ветровая); `wave_win.d_p` — спектральный пик ветровой системы, а не `wdir` напрямую.
 
 ### Averager
-Хранит кольцевой буфер последних `MEAN` выходов. `get_mean()` усредняет их (до `min(index, MEAN)` накоплений) и **нормирует спектральные массивы в [0, 255]** перед возвратом. Возвращает `(Output, spec_1d, spec_2d, port)` — все spectral arrays нормированы в `[0, 255]` и приведены к `int`; поля Wave (swh, t_p и т.д.) нормировке не подвергаются.
+Кольцевой буфер `MEAN` выходов. `get_mean()` возвращает `(Output, port)` — 2-tuple (spec_1d/spec_2d только внутри Output). Спектральные массивы нормированы в [0, 255].
 
-В `processor.update()` возвращённые `spec_1d`/`spec_2d` (позиции 2,3) не используются; `port` (позиция 4) идёт в `ProcessResult.port` → `_port.csv` sink.
+`matplotlib` в `processor.py` импортируется **лениво** — только внутри `_save_debug_*` функций. При `pics=false` matplotlib не нужен и в бандл не включается.
 
 ## Основные структуры
 
 ### Wave
 ```python
 Wave(swh, snr, t_p, t_m, d_p, d_m)
-# t_p = пиковый период [с]
-# t_m = средний период [с]
-# d_p = пиковое направление [°], математическая конвенция
-# d_m = среднее направление [°]
-```
-Удалённые поля (не использовать): `vco`, `inv`, `per`, `len`, `dir`, `ddir`.
-
-### WaveOutput
-Промежуточная структура, передаётся из `Processor.update()` в `Averager.push()` (в sinks не попадает):
-```python
-WaveOutput(ide_sys, wave_sum, wave_win, wave_sw1, wave_sw2, spec_1d, spec_2d)
-```
-`Averager.push()` накапливает их в кольцевом буфере; `get_mean()` строит полноценный `Output`.
-
-### Output
-Центральная структура, создаётся `Averager.get_mean()` и передаётся через `ProcessResult.output` в sinks:
-```python
-Output(
-    pulse, step, rps,          # параметры радара
-    n_in_win, n_wins,          # кол-во кадров в окне и накоплений
-    step_area, n_area,         # шаг и размер сегмента
-    n_start,                   # переиспользован под HDG (целые градусы)
-    cog_proc, sog_proc,        # навигация [м/с], заполняется в processor.update()
-    max_sys, ide_sys,          # макс. и текущее число систем
-    wave_sum, wave_win,        # суммарная и ветровая волны (Wave)
-    wave_sw1, wave_sw2,        # зыби 1 и 2 (Wave)
-    n_dis,                     # quality flag (0=плохо, 1=хорошо)
-    spec_1d,                   # нормированный 1D спектр [0..255], int array
-    spec_2d,                   # нормированный 2D спектр [0..255], int array
-)
-# Дополнительные поля, устанавливаемые в processor.update() после get_mean():
-# .curr_speed — модуль истинного тока воды [м/с]
-# .curr_dir   — компасный курс тока [°]
-# .wind_dir   — направление ветра по бэкскаттеру [°]
-# .wspd       — скорость ветра [м/с] = 0.01·(WSPD_A + WSPD_B·ring_sig)
+# t_p, d_p — пиковые; t_m, d_m — средние (только для wave_sum; для систем = 0)
 ```
 
 ### ProcessorState
 ```python
-index: int                                # монотонный счётчик кадров; триггер расчёта: index >= N_SHOTS and index % out_times == 0
-cbck: (NUM_AREA, N_SHOTS, 2·ASP, 2·ASP)  # float32, 4D буфер всех сегментов
-speed, heading, cog: (MEAN,)              # скользящие окна нави-данных [м/с и °]
-curr_step: float                          # range resolution [м/px] текущего кадра
-curr_pulse: int                           # код импульса текущего кадра
-vco: float                               # legacy поле, не используется
-indices: np.ndarray                       # legacy: инициализируется arange(N_SHOTS), roll-ится каждый кадр, но никогда не читается
+index: int
+cbck: (NUM_AREA, N_SHOTS, 2·ASP, 2·ASP)  # float32
+speed, heading, cog: (N_SHOTS,) / (MEAN,) / (N_SHOTS,)
+curr_step: float
+curr_pulse: int
 ```
 
-### CurrentOutput / WindOutput
-Вспомогательные структуры в `structs.py` (не упаковываются в UDP напрямую):
-```python
-CurrentOutput(u_x, u_y)   # [м/с], географический фрейм; .speed, .direction — derived properties
-WindOutput(direction, sig) # wdir [°] и средняя интенсивность бэкскаттера
-```
-
-### Processor.update() return
-`update(back, navi)` возвращает dict — Manager конвертирует его в `ProcessResult`:
+### Processor.update() return → ProcessResult
 ```python
 {"out": Output | None, "pulse": int, "step": float, "navi": Navi, "port": ndarray | None}
-```
-`"out"` = `None` пока `s.index < N_SHOTS` или условие `% out_times` не выполнено.
-
-### ProcessResult
-Передаётся из Processor в output sinks через `Manager.out_queue`:
-```python
-ProcessResult(output: Output, port: np.ndarray, navi: Navi)
+ProcessResult(output: Output, port: ndarray, navi: Navi)
 ```
 
-### OutputSink (интерфейс)
-Новые sinks наследуются от `OutputSink` (`src/io/output.py`) и реализуют:
-```python
-def send(self, result: ProcessResult): ...  # обязательный
-def close(self): ...                        # необязательный (вызывается при shutdown)
+### UDP пакет v2.0 — **1412 байт** (< 1472, без IP-фрагментации)
+
+```
+"<BBHHHHHHHHHHHHHHHHHHHHBBHHHH{N_FREQ}B{N_FREQ_2D×N_DIRS}B"
+ 52 байта заголовок + 64 байта spec_1d + 36×36 байт spec_2d
 ```
 
-### UDP пакет (2420 байт)
-```
-"<BBHHBBHHHHHBBHHHHHHHHHHHHHhHH{N_FREQ}B{N_FREQ×N_DIRS}B"
- ────────────────────────────────────────────────────────────────────
- 52 байт заголовок + N_FREQ байт spec_1d + N_FREQ×N_DIRS байт spec_2d
-```
-Индексы `un[]` в `tester_receive.py`:
-- `un[3]`  = `rps * 100`         (угловая скорость)
-- `un[6]`  = `step_area * 1000`  (шаг сегмента)
-- `un[7]`  = `curr_dir`          (целые градусы; был n_area)
-- `un[8]`  = `n_start` → **HDG** (целые градусы)
-- `un[9]`  = `cog_proc * 100`
-- `un[10]` = `sog_proc * 100`
-- `un[11]` = `curr_speed * 100`  (uint8, [cm/s]; был max_sys)
-- `un[12]` = `ide_sys`
-- `un[13..15]` = wave_sum: `swh*100`, `d_p*100`, `t_p*100`
-- `un[16..18]` = wave_win (ветровая): swh, d_p, t_p
-- `un[19..21]` = wave_sw1
-- `un[22..24]` = wave_sw2
-- `un[25]` = quality flag (h, signed; 0 = плохо, 1 = хорошо)
-- `un[26]` = 0 (зарезервировано)
-- `un[27]` = `wind_dir` [°]
-- `un[28]` = `wspd × 10` [0.1 м/с]
-- `un[29..]` = spec_1d, затем spec_2d
+| Индекс | Тип | Поле | Кодирование |
+|---|---|---|---|
+| [0] | B | type=5 | — |
+| [1] | B | pulse | 1/2/3 |
+| [2] | H | step_mm | м×1000 |
+| [3] | H | rpm_x100 | об/мин×100 |
+| [4] | H | swh_sum | м×100 |
+| [5] | H | t_p_sum | с×100 |
+| [6] | H | t_m_sum | с×100 |
+| [7] | H | dir_p_sum | °, целые |
+| [8] | H | dir_m_sum | °, целые |
+| [9..11] | H×3 | wind: swh, t_p, dir_p | м×100 / с×100 / ° |
+| [12..14] | H×3 | sw1: swh, t_p, dir_p | аналогично |
+| [15..17] | H×3 | sw2: swh, t_p, dir_p | аналогично |
+| [18] | H | curr_speed | м/с×100 |
+| [19] | H | curr_dir | °, КОМПАС |
+| [20] | H | wspd_x10 | м/с×10 |
+| [21] | H | wind_dir | °, математическая конвенция |
+| [22] | B | n_sys | 0–3 |
+| [23] | B | quality | 0=BAD, 1=GOOD |
+| [24..27] | H×4 | reserved | =0 |
+| [28..91] | B×64 | spec_1d | [0–255] |
+| [92..] | B×1296 | spec_2d 36×36 | row-major: dir×freq |
+
+**Конвенции направлений:**
+- `dir_p/m_sum`, `dir_p_win/sw1/sw2`, `wind_dir` — **математическая**: 0°=Восток, CCW
+- `curr_dir` — **компасная**: 0°=Север, CW; `arctan2(East, North) % 360`
+- `spec_2d` строка i — математический угол i×10°
+
+**Авторитетный источник протокола**: `udp_protocol.docx` (v2.0).
 
 ### CSVOutputSink
-При `file = true` создаёт 4 файла с timestamp-префиксом `YYYYMMDDTHHMMSS`:
+При `file = true` создаёт 4 файла. Имя: `{installation_id}_{YYYYMMDDTHHMMSS}_*.csv` (если `installation_id != "default"`), иначе просто `{timestamp}_*.csv`.
 - `_params.csv` — `datetime;pulse;step;swh;t_p;d_p;d_m;t_m;freq[0..N_FREQ-1]`
 - `_port.csv` — ω-k портрет `(N_SHOTS//2, K_NUM)`
-- `_spec.csv` — направленный спектр `(N_DIRS, N_FREQ)`
+- `_spec.csv` — направленный спектр `(N_DIRS, N_FREQ_2D)` = 36×36
 - `_navi.csv` — `datetime,lat,lon,spd,sog,cog,hdg`
 
-`save_path` в `[output]` должен заканчиваться разделителем (`/` на Linux, `\` на Windows).
+Файловые дескрипторы держатся открытыми (`buffering=1`) — не открываются/закрываются на каждую запись.
 
 ## Файлы проекта
 
 | Файл | Назначение |
 |------|-----------|
-| `src/processing/processor.py` | Главный процессор, `update()` — основной цикл; `_SIGNAL_BAND=10`; debug-функции `_save_debug_portrait`, `_save_debug_freq_spec`, `_save_debug_spec2d`, `_save_debug_segments` |
-| `src/processing/state.py` | `ProcessorState` — состояние между кадрами |
-| `src/processing/averaging.py` | `Averager` — кольцевой буфер, нормировка в [0,255] |
+| `src/processing/processor.py` | Главный процессор; `_SIGNAL_BAND=10`; `_MAX_CURRENT=3.0`; debug-функции с ленивым импортом matplotlib |
+| `src/processing/state.py` | `ProcessorState` |
+| `src/processing/averaging.py` | `Averager(mean, n_freq, n_freq_2d, n_dirs, n_shots, cut_num)` — кольцевой буфер, нормировка в [0,255]; возвращает `(Output, port)` |
 | `src/algorithms/spectrum2d.py` | `calc_spec3d`, `calc_port`, `apply_doppler_3d_vec`, `separate_signal_noise`, `apply_mtf`, `compute_snr`, `compute_frequency_spectrum`, `calc_spec2d` |
-| `src/algorithms/dispersion.py` | `calc_current_vector` (двухпроходной МНК), `calc_current_multiwave` (per-system МНК при ≥2 системах, с `sys_scatter`), `calc_vco` (legacy), `dispersion_curve`; пороги `_MULTI_*` |
-| `src/algorithms/partition.py` | `calc_wspd`, `find_freq_peaks`, `find_system_dirs`, `calc_partitions`; пороги `_FPEAK_*`, `_SDIR_*`, `_PART_*` |
-| `src/algorithms/area.py` | `Area.calc_mask()` — вырезка сегмента с билинейной интерполяцией |
-| `src/config.py` | `load_config()` → `AppConfig(Constants, PipelineConfig, input, output)` |
-| `src/io/structs.py` | `Wave`, `WaveOutput`, `Output`, `ProcessResult`, `BackData`, `BackPack`, `Navi`; `parse_back_packet()`, `parse_navi_packet()` → `ProtocolError` при неверном формате |
-| `src/io/output.py` | `OutputSink` (база), `UdpOutputSink`, `CSVOutputSink` |
-| `src/io/input.py` | `UdpInputSource`, `NCInputSource`, `BT8InputSource` |
-| `src/io/service.py` | Создание UDP-сокетов |
+| `src/algorithms/dispersion.py` | `calc_current_vector`, `calc_current_multiwave`; `_MULTI_MAX_CURRENT=3.0` |
+| `src/algorithms/partition.py` | `calc_wspd`, `find_freq_peaks`, `find_system_dirs`, `calc_partitions`; системы возвращают только `{h_s, t_p, d_p}` |
+| `src/algorithms/area.py` | `Area.calc_mask()` |
+| `src/config.py` | `load_config()` с fallback-значениями; N_FREQ/N_DIRS/K_NUM/NUM_AREA/N_FREQ_2D — захардкожены |
+| `src/io/structs.py` | Все структуры данных |
+| `src/io/output.py` | `UdpOutputSink`, `CSVOutputSink` |
+| `src/io/input.py` | `UdpInputSource` (get_bck возвращает copy), `NCInputSource`, `BT8InputSource` |
+| `src/io/service.py` | UDP-сокеты |
 | `src/runtime/manager.py` | Трёхпоточный пайплайн с watchdog |
-| `src/runtime/logger.py` | `setup_logger()` |
-| `config.ini` | Все константы и настройки |
-| `test/tester_receive.py` | Визуализация: 1D спектр + полярный спектр + таблица параметров |
-| `test/tester_transmit.py` | Генератор тестового UDP-потока (без радара) |
-| `batch_process.py` | Пакетная обработка NC-файлов; реализует тот же двухфазный пайплайн (pre-analysis + multiwave/fallback), что и `processor.py`. Диагностическая фигура (3 колонки): [0,0] 1D спектр с цветными полосами систем; [0,1] полярный направленный спектр с крестами `systems_draft`; [0,2] ω-k портрет с цветным scatter по системам; [1,:] кольцо бэкскаттера; [2,:] таблица параметров. Для файлов `"0606"` загружает данные буя (ewdm, xarray). `_SIGNAL_BAND=10` продублирован — менять синхронно с `processor.py`. `wind_meta={'u_10','v_10'}` добавляет ERA5-направление ветра. |
-| `batch_process_parallel.py` | Параллельная обёртка над `batch_process._process_file`: локальный `multiprocessing.Pool` (`--n-workers`) или SLURM-array (`--task-id`/`--n-tasks`); `--merge-only` сливает partial CSV из `{out}/partial/` |
-| `run_batch.sh` | SLURM sbatch-скрипт: партиция `r2c2`, 48 CPU, 160 GB |
-| `debug_multiwave.py` | Автономный диагностический скрипт для одного NC-файла: прогоняет полный мультиволновой пайплайн и сохраняет 4 debug-PNG в `./debug_out/`. Путь NC и параметры захардкожены внутри. |
-| `view_res.py` | Черновой просмотр результатов батча из `batch_out/params.csv`. Не синхронизируется. |
-| `compare_pipelines.py` | Диагностика расхождений batch_process vs processor на `0606_4338.nc`: тест A — одни кадры, разный ring-buf offset (изолирует Hann-window misalignment); тест B — разные окна кадров (как в реальном processor). Путь NC захардкожен внутри. |
+| `config.ini` | Продакшн UDP (pics=false, type=udp) |
+| `config_debug.ini` | Отладка (type=nc, N_SHOTS=64, pics=./, file=true) |
+| `config_udp.ini` | Синоним config.ini (источник для копирования) |
+| `test/tester_receive.py` | Визуализация UDP v2.0: 1D спектр + полярный спектр + таблица |
+| `test/tester_transmit.py` | Генератор тестового потока |
+| `seavision-win.spec` | PyInstaller onedir для Windows (без matplotlib, без UPX) |
+| `requirements-win.txt` | numpy, scipy, netCDF4, cftime — минимум для Windows-бандла |
+| `.github/workflows/build-windows.yml` | GHA: Windows x64 → артефакт `seavision-windows-x64` |
+| `udp_protocol.docx` | **Авторитетный** протокол v2.0 |
+| `batch_process.py` | Пакетная обработка; `_MAX_CURRENT=3.0`, `_SIGNAL_BAND=10` |
+| `batch_process_parallel.py` | Параллельная обёртка (multiprocessing / SLURM) |
+| `debug_multiwave.py` | Диагностика одного NC-файла |
 
 ### Устаревшие файлы
-`src/algorithms/portrait.py`, `src/algorithms/direction.py` — старые реализации, не импортируются. Не трогать и не реанимировать.
+`src/algorithms/portrait.py`, `src/algorithms/direction.py` — не импортируются. Не трогать.
 
-## Конфигурация (config.ini)
+## Конфигурация
 
-Секции: `[constants]` — физические параметры; `[pipeline]` — `queue_size`, `restart_on_error`; `[input]` — `type`, `my_ip`, `back_port`, `navi_port`, `data_path` и др.; `[output]` — `udp`, `file`, `server_ip`, `server_port`, `save_path`, `out_times`, `pics`.
+Секции и их назначение:
 
-Обычно стабильные значения:
 ```
-AAP=4096  ARDP=2048  ADP=1192  ASP=192
-K_NUM=32  N_SHOTS=256  N_FREQ=64  N_DIRS=36
-NUM_AREA=8  RPM=25  MEAN=4
-CHANGE_DIR_NUM_SHOTS=16  ← загружается в Constants, но Processor не использует (legacy)
+[hardware]        ← геометрия инсталляции, задаётся при монтаже
+  installation_id  AREA_AZIM_PX  AREA_READ_DIST_PX  AREA_DISTANCE_PX  AREA_SIZE_PX  RPM
+
+[calibration]     ← подгоняется по месту после установки
+  SNR_A  SNR_B    — SWH = 0.01·(SNR_A + SNR_B·√snr)
+  WSPD_A  WSPD_B  — WSPD = 0.01·(WSPD_A + WSPD_B·ring_sig)
+  WIND_SIG_MIN    — минимальный std кольца для quality=GOOD (зависит от инсталляции)
+
+[processing]      ← N_SHOTS можно снижать при отладке
+  N_SHOTS=256  MEAN=4
+
+[input] / [output] / [pipeline]  ← сетевые настройки, файлы, очередь
 ```
-`SNR_A`, `SNR_B`, `WSPD_A`, `WSPD_B` — меняются при рекалибровке; **всегда смотреть в config.ini**. Коэффициенты WSPD в config.ini умноженные на 0.01 в коде дают м/с.
 
-Флаги качества (захардкожены, **не в config.ini**; одинаковы в `processor.py` и `batch_process.py`):
+**Захардкожены в `load_config()`, не в config.ini** (версия алгоритма/протокола):
+```
+N_FREQ=64  N_DIRS=36  K_NUM=32  NUM_AREA=8  N_FREQ_2D=36
+```
 
-| Параметр | Значение |
-|---|---|
-| `_SNR_QUALITY_MIN` | 5.0 |
-| `_WIND_SIG_MIN` | 5.5 |
-| `_T_PEAK_MIN` | 5.5 |
+Флаги качества (**захардкожены в коде**, одинаковы в `processor.py` и `batch_process.py`):
 
-- `quality = 1` если все три условия выполнены И `n_sys >= 1`
-- `ring_sig` = `std` интенсивности бэкскаттера в кольце `ADP±ASP` (≠ `sig` из `calc_wspd`)
-- При `quality=0`: причина выводится в лог
+| Параметр | Значение | Место |
+|---|---|---|
+| `_SNR_QUALITY_MIN` | 5.0 | processor.py |
+| `WIND_SIG_MIN` | 5.5 (default) | **config [calibration]** |
+| `_T_PEAK_MIN` | 5.5 | processor.py |
 
-`om_max = π · RPM / 60 ≈ 1.309 rad/s` (частота Найквиста).
+`quality = 1` если все условия выполнены И `n_sys >= 1`.
 
-Имена в ini → имена в коде: `AREA_AZIM_PX=AAP`, `AREA_READ_DIST_PX=ARDP`, `AREA_DISTANCE_PX=ADP`, `AREA_SIZE_PX=ASP`.
+`om_max = π · RPM / 60 ≈ 1.309 rad/s`.
 
-## Алгоритмические пороги (вынесены как module-level константы)
+## Алгоритмические пороги
 
-### `src/algorithms/partition.py` — пороги `_FPEAK_*` / `_SDIR_*` / `_PART_*`
+### `src/algorithms/partition.py`
 
 | Константа | Значение | Назначение |
 |---|---|---|
-| `_FPEAK_MIN_PROM_REL` | 0.15 | Минимальная высота пика относительно глобального максимума |
-| `_FPEAK_BAND_HALF_FRAC` | 0.10 | Полуширина частотной полосы пика (доля от n_om) |
-| `_FPEAK_MIN_SEP_FRAC` | 0.12 | Минимальное расстояние между пиками (доля от n_om) |
-| `_FPEAK_SMOOTH_SIGMA` | 2.0 | Гауссово сглаживание перед поиском пиков [бин] |
-| `_FPEAK_MAX` | 3 | Максимальное число искомых пиков |
+| `_FPEAK_MIN_PROM_REL` | 0.15 | Минимальная высота пика [доля от max] |
+| `_FPEAK_BAND_HALF_FRAC` | 0.10 | Полуширина полосы пика [доля от n_om] |
+| `_FPEAK_MIN_SEP_FRAC` | 0.12 | Минимальное расстояние между пиками |
+| `_FPEAK_SMOOTH_SIGMA` | 2.0 | Гауссово сглаживание [бин] |
+| `_FPEAK_MAX` | 3 | Максимальное число пиков |
 | `_SDIR_SMOOTH_SIGMA` | 1.0 | Сглаживание угловой проекции [бин] |
-| `_PART_MIN_DIR_SEP` | 25.0 | Минимальное угловое расстояние между системами [°] |
-| `_PART_MIN_PER_RATIO` | 1.1 | Минимальное отношение T_large/T_small для различимости |
-| `_PART_MIN_ENERGY_FRAC` | 0.05 | Минимальная доля энергии окна пика в total_energy |
-| `_PART_NOISE_SNR` | 3.0 | Пик должен превышать медиану фона × этот коэффициент |
-| `_PART_BLANK_FRAC` | 0.08 | Радиус гашения пика [доля от каждой оси] |
-| `_PART_WIND_DIR_THRESH` | 45.0 | Максимальный угол от wdir для классификации как ветровая [°] |
+| `_PART_MIN_DIR_SEP` | 25.0 | Минимальное угловое расстояние [°] |
+| `_PART_MIN_PER_RATIO` | 1.1 | T_large/T_small для различимости |
+| `_PART_MIN_ENERGY_FRAC` | 0.05 | Минимальная доля энергии пика |
+| `_PART_NOISE_SNR` | 3.0 | Пик > медиана × этот коэффициент |
+| `_PART_BLANK_FRAC` | 0.08 | Радиус гашения [доля оси] |
+| `_PART_WIND_DIR_THRESH` | 45.0 | Максимальный угол от wdir для ветровой [°] |
 
-### `src/algorithms/dispersion.py` — пороги `_MULTI_*`
+### `src/algorithms/dispersion.py`
 
 | Константа | Значение | Назначение |
 |---|---|---|
-| `_MULTI_DIR_HALF_DEG` | 45.0 | Полуширина углового конуса вокруг направления системы [°] |
-| `_MULTI_MIN_CELLS` | 5 | Минимальное число ячеек для включения системы в МНК |
-| `_MULTI_MIN_SV_RATIO` | 0.05 | Минимальное σ_min/σ_max (защита от вырожденной матрицы) |
-| `_MULTI_MAX_CURRENT` | 2.55 | Физический клип для остаточного тока [м/с] |
-| `_MULTI_K_MIN_REL` | 0.08 | Минимальный k/k_max для включения ячейки (длинная зыбь даёт Δω<0.5 бина) |
+| `_MULTI_DIR_HALF_DEG` | 45.0 | Угловой конус вокруг направления системы [°] |
+| `_MULTI_MIN_CELLS` | 5 | Минимум ячеек для МНК |
+| `_MULTI_MIN_SV_RATIO` | 0.05 | Защита от вырожденной матрицы |
+| `_MULTI_MAX_CURRENT` | **3.0** | Клип остаточного тока в multiwave [м/с] |
+| `_MULTI_K_MIN_REL` | 0.08 | Минимальный k/k_max |
+
+### `src/processing/processor.py`
+
+| Константа | Значение | Назначение |
+|---|---|---|
+| `_SIGNAL_BAND` | 10 | Полуширина дисперсионной полосы [k-бинов]; при изменении перекалибровать SNR_A/B |
+| `_MAX_CURRENT` | **3.0** | Клип скорости тока перед выводом [м/с] |
+| `_SNR_QUALITY_MIN` | 5.0 | Минимальный SNR для quality=GOOD |
+| `_T_PEAK_MIN` | 5.5 | Минимальный T_peak [с] для quality=GOOD |
 
 ## Debug-выводы
 
-`Processor(config, pics)` — `pics=False` или строка `"false"` отключают отладку; строка с путём к директории (или `"."`) включают. В `main.py` передаётся из `cfg.output.get("pics", "false")`.
-
-`pics` в `[output]`: `false` — отключено; путь к директории (или `"."`) — PNG рядом с `main.py`:
-- `debug_combined.png` — единый диагностический рисунок (3 панели + таблица параметров):
-  - [0,0] 1D частотный спектр `s_omega_pre` (ship-corrected) с полосами систем и Tp/Tm линиями
-  - [0,1] полярный направленный спектр `s_om_th` с маркерами систем и COG стрелкой
-  - [0,2] ω-k портрет `port_corr` (до коррекции) с кривыми `ship_only` и `full` и scatter из `sys_scatter`
-  - [1,:] таблица параметров: Hs, Tp, Dp, системы, Ux/Uy, ток, SNR, WSPD
+`Processor(config, pics)` — `pics=False`/`"false"` отключают; строка с путём — включают.
+PNG `debug_combined.png`: [0,0] 1D спектр; [0,1] полярный спектр; [0,2] ω-k портрет; [1,:] таблица параметров.
 
 ## Визуализация (tester_receive.py)
 
-- `F_DISPLAY = 0.20` Hz — радиальный предел полярного спектра
-- Colormap: белый (0) → тёмно-синий → зелёный → жёлтый → красный
-- `_RENDER_DT = 0.35 с` — декаплинг приёма UDP от отрисовки
-
-## UDP-протокол — сводка и авторитетный источник
-
-Полное описание протокола: `udp_protocol_ru.md` (версия 1.1) — **авторитетный источник**.
-Старый `udp_protocol.docx` устарел в части именования поля [3]: там оно называлось `rps × 100`, но в коде всегда хранился **RPM × 100** (25 об/мин × 100 = 2500). Новый md это исправляет.
-
-### Конвенции направлений в пакете
-
-| Поле | Конвенция |
-|---|---|
-| `curr_dir` [7] | **КОМПАС**: 0°=Север, по часовой; `arctan2(East, North) % 360` |
-| `dir_sum/win/sw1/sw2` [14,17,20,23] | **МАТ.**: 0°=Восток, против часовой |
-| `wind_dir` [27] | **МАТ.**: 0°=Восток, против часовой |
-| `spec_2d` строка i | **МАТ.**: направление i×10° (строка 0=Восток, строка 9=Север) |
-
-Перевод математической конвенции в компасную: `(90 − θ_мат) mod 360`.
-
-### Известный визуальный баг: tester_receive.py — полярный спектр
-
-**Проблема**: полярная ось задана в компасной конвенции (`theta_zero='N'`, по часовой), но математические углы из пакета отображаются напрямую без конвертации. Результат: все стрелки направлений и весь спектр повёрнуты на 90° и отражены.
-
-**Не трогать** (баг визуализатора, не протокола/кода):
-- В `_update()`: `angle = np.radians(d.get(key, 0))` должно быть `np.radians((90.0 - d.get(key, 0)) % 360)`.
-- Theta-edges для `pcolormesh` spec_2d аналогично требуют сдвига.
-
-Это не затрагивает корректность передаваемых данных — только их отображение в `tester_receive.py`.
+- `F_DISPLAY = 0.20` Hz — радиальный предел
+- `_RENDER_DT = 0.35 с` — декаплинг UDP/отрисовки
+- spec_2d приходит как (36, 36) row-major; `.T` для pcolormesh
 
 ## Что НЕ нужно делать
 
-- **Не применять `apply_doppler_2d` и скалярный `apply_doppler_3d`** — оба устарели. Использовать только `apply_doppler_3d_vec(spec_3d, k_max, Ux, Uy, om_max)`.
-- **Не прибавлять скорость судна к `(Ux, Uy)` перед Doppler-коррекцией** — `(Ux, Uy)` для `apply_doppler_3d_vec` уже включает скорость судна. SOG прибавляется только при вычислении истинного тока для вывода.
-- **При multiwave**: `calc_current_multiwave` принимает `spec_3d_ship` (уже скорректированный на судно), возвращает **остаточный** `(Ucx, Ucy)`. Финальный: `Ux = Ucx + Ux_ship`. Не передавать `spec_3d_corr` напрямую в multiwave.
-- **Не использовать SOG в узлах** — `navi.sog` и `navi.spd` уже в м/с.
-- **Не добавлять длины волн в пакет** — длины волн удалены из UDP пакета и нигде не вычисляются.
+- **Не применять** `apply_doppler_2d` и скалярный `apply_doppler_3d` — устарели.
+- **Не прибавлять SOG к `(Ux, Uy)` перед Doppler-коррекцией** — они уже включают скорость судна.
+- **При multiwave**: `calc_current_multiwave` принимает `spec_3d_ship`, возвращает остаточный `(Ucx, Ucy)`; `Ux = Ucx + Ux_ship`.
 - **Не использовать** удалённые поля Wave: `per`, `len`, `dir`, `ddir`, `vco`, `inv`.
-- **Не менять бинарный формат UDP пакета** — `tester_receive.py` зависит от него.
-- **Не передавать `--config` в командной строке** — путь захардкожен в `main.py`.
-- **Не реанимировать** `src/algorithms/portrait.py`, `src/algorithms/direction.py`.
-- **При изменении `_SIGNAL_BAND`** — перекалибровать SNR_A/B и изменить синхронно в `processor.py` и `batch_process.py`.
-- **Не ориентироваться на старый `udp_protocol.docx`** — использовать `udp_protocol_ru.md`.
+- **При изменении `_SIGNAL_BAND`** — перекалибровать SNR_A/B синхронно в `processor.py` и `batch_process.py`.
+- **Не трогать** `udp_protocol.docx` вручную — он генерируется скриптом.
+- **Не реанимировать** `portrait.py`, `direction.py`.
+- **Averager.get_mean()** возвращает 2-tuple `(Output, port)`, не 4-tuple.
+- **calc_partitions** возвращает на систему только `{h_s, t_p, d_p}` — без `t_m`, `d_m`.
 
 ## Ссылки на литературу
 
-Методология Допплер-коррекции: Carrasco, Lund, Nieto-Borge, Young.
-Принцип: векторная поправка `Δω = kx·Ux + ky·Uy` корректна для любого числа волновых систем одновременно.
-
-Мультиволновая оценка тока: per-system centroid МНК с нормировкой весов (аналог NSP, Dankert & Rosenthal 2004; Stewart & Joy 1974 — концепция эффективной глубины). Работает лучше при угловом разделении систем > 45°; при двух коллинеарных системах матрица A вырождается — автоматический fallback на `calc_current_vector`.
+Допплер-коррекция: Carrasco, Lund, Nieto-Borge, Young. Принцип: `Δω = kx·Ux + ky·Uy`.
+Мультиволновой ток: Dankert & Rosenthal 2004; Stewart & Joy 1974. Fallback при коллинеарных системах.

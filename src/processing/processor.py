@@ -16,11 +16,10 @@ from src.algorithms.spectrum2d import (
     calc_spec2d,
 )
 
-_SIGNAL_BAND  = 10
-_MAX_CURRENT  = 2.55
-_SNR_QUALITY_MIN = 5.0
-_WIND_SIG_MIN    = 5.5
-_T_PEAK_MIN      = 5.5
+_SIGNAL_BAND     = 10     # dispersion band half-width [k-bins]; recalibrate SNR_A/B if changed
+_MAX_CURRENT     = 3.0    # physical clip for apparent current [m/s]
+_SNR_QUALITY_MIN = 5.0    # min snr_tot for quality=GOOD
+_T_PEAK_MIN      = 5.5    # min peak period [s] for quality=GOOD
 
 from src.algorithms.partition import calc_wspd, calc_partitions, find_freq_peaks, find_system_dirs
 from src.io.structs import Wave, WaveOutput
@@ -551,6 +550,7 @@ class Processor:
         self.averager = Averager(
             mean=self.cst.MEAN,
             n_freq=self.cst.N_FREQ,
+            n_freq_2d=self.cst.N_FREQ_2D,
             n_dirs=self.cst.N_DIRS,
             n_shots=self.cst.N_SHOTS // 2,
             cut_num=self.cst.K_NUM,
@@ -697,9 +697,7 @@ class Processor:
             def _sys_wave(d):
                 if d is None:
                     return Wave()
-                return Wave(swh=d["h_s"], snr=0.0,
-                            t_p=d["t_p"], t_m=d["t_m"],
-                            d_p=d["d_p"], d_m=d["d_m"])
+                return Wave(swh=d["h_s"], t_p=d["t_p"], d_p=d["d_p"])
 
             wave_win = _sys_wave(sys["w_s"])
             wave_sw1 = _sys_wave(sys["sw_1"])
@@ -708,15 +706,15 @@ class Processor:
             # ── Quality flag ──────────────────────────────────────────────────
             quality = int(
                 snr_tot  >= _SNR_QUALITY_MIN
-                and ring_sig >= _WIND_SIG_MIN
+                and ring_sig >= cst.WIND_SIG_MIN
                 and T_peak   >= _T_PEAK_MIN
                 and sys["n_sys"] >= 1
             )
             if not quality:
                 reasons = []
-                if snr_tot  < _SNR_QUALITY_MIN: reasons.append(f'snr={snr_tot:.2f}<{_SNR_QUALITY_MIN}')
-                if ring_sig < _WIND_SIG_MIN:    reasons.append(f'ring_sig={ring_sig:.2f}<{_WIND_SIG_MIN}')
-                if T_peak   < _T_PEAK_MIN:      reasons.append(f'T_peak={T_peak:.2f}<{_T_PEAK_MIN}')
+                if snr_tot  < _SNR_QUALITY_MIN:    reasons.append(f'snr={snr_tot:.2f}<{_SNR_QUALITY_MIN}')
+                if ring_sig < cst.WIND_SIG_MIN:    reasons.append(f'ring_sig={ring_sig:.2f}<{cst.WIND_SIG_MIN}')
+                if T_peak   < _T_PEAK_MIN:         reasons.append(f'T_peak={T_peak:.2f}<{_T_PEAK_MIN}')
                 if sys["n_sys"] < 1:            reasons.append('n_sys=0')
                 msg = f'quality=BAD: {", ".join(reasons)}'
                 _log.info(msg)
@@ -738,7 +736,7 @@ class Processor:
                 np.linspace(0, self.om_max, cst.N_FREQ), omega_vals, s_omega)
             f_interp = interp1d(omega_vals, s_om_th, axis=1, kind='linear',
                                 fill_value=0.0, bounds_error=False)
-            spec_2d = f_interp(np.linspace(0, self.om_max, cst.N_FREQ))
+            spec_2d = f_interp(np.linspace(0, self.om_max, cst.N_FREQ_2D))
 
             wave_out = WaveOutput(
                 ide_sys=sys["n_sys"],
