@@ -108,27 +108,31 @@ class UdpInputSource(InputSource):
     def get_bck(self, *, overall_timeout: Optional[float] = 30.0, per_recv_timeout: Optional[float] = 2.0,
                 max_duplicates: int = 4, max_attempts: Optional[int] = None) -> BackData:
         """
-        Collect backscatter lines until all lines are ready (or until timeout / duplicates).
-        - overall_timeout: total seconds to wait for the full collection (None means wait forever)
-        - per_recv_timeout: timeout passed to each recv; if None we compute remaining overall time per loop
-        - max_duplicates: the threshold used by original code to break early when duplicate lines observed
-        - max_attempts: optional hard limit on number of packets to try before failing
+        Collect backscatter lines until every line has both parts received.
 
-        Returns self.curr_bck (mutated in-place).
-        Raises TimeoutError if overall_timeout elapses or max_attempts exceeded.
+        Two separate trackers:
+          ready_vec  — set on part_index=0 arrival; used for duplicate detection
+                       (when part_index=0 arrives for an already-seen line → next
+                       rotation started → double_counter++).
+          part1_seen — set on part_index=1 arrival; the true completion criterion.
+
+        Exit when part1_seen.all() (all lines fully received) or
+        double_counter >= max_duplicates (forced early exit: next frame started).
         """
-        # initialize trackers
         self.double_counter = 0
-        ready_vec = np.zeros(self.curr_bck.bck.shape[0], dtype=bool)
-        attempts = 0
+        n = self.curr_bck.bck.shape[0]
+        ready_vec  = np.zeros(n, dtype=bool)  # p0 arrivals — duplicate detection
+        part1_seen = np.zeros(n, dtype=bool)  # p1 arrivals — completion criterion
+        attempts   = 0
         start_time = time()
 
         while True:
-            if np.sum(ready_vec) >= ready_vec.shape[0]:
+            if part1_seen.all():
+                break
+            if self.double_counter >= max_duplicates:
                 break
             if max_attempts is not None and attempts >= max_attempts:
                 raise TimeoutError(f"Reached max_attempts={max_attempts} without collecting all lines")
-            # compute per-recv timeout to honor overall_timeout if set
             if overall_timeout is None:
                 recv_timeout = per_recv_timeout
             else:
@@ -136,30 +140,27 @@ class UdpInputSource(InputSource):
                 remaining = overall_timeout - elapsed
                 if remaining <= 0:
                     raise TimeoutError("Overall timeout expired while waiting for backscatter data")
-                # if caller provided a per_recv_timeout, we use the min of remaining and that value
                 recv_timeout = remaining if per_recv_timeout is None else min(remaining, per_recv_timeout)
 
             attempts += 1
             try:
                 backpack = self.recv_back_once(timeout=recv_timeout)
-                ready_count = self.proc_back_packet(backpack, ready_vec, max_duplicates)
+                self.proc_back_packet(backpack, ready_vec, max_duplicates)
+                if backpack.part_index == 1:
+                    part1_seen[backpack.num_line] = True
 
-                if ready_count >= ready_vec.size:
-                    break
-
-            except ProtocolError as pe:
+            except ProtocolError:
                 continue
             except TimeoutError:
                 continue
 
-        n_recv = int(np.sum(ready_vec))
+        n_recv = int(np.sum(part1_seen))
         self.curr_bck.n_received = n_recv
-        if n_recv < ready_vec.size:
-            pct = 100.0 * n_recv / ready_vec.size
-            print()  # newline so the warning doesn't corrupt the \r progress bar
+        if n_recv < n:
+            pct = 100.0 * n_recv / n
+            print()
             log.warning(
-                f'Frame incomplete: {n_recv}/{ready_vec.size} lines ({pct:.0f}%) — '
-                f'packet loss. Increase rmem_max or LINE_SLEEP in tester.')
+                f'Frame incomplete: {n_recv}/{n} lines ({pct:.0f}%) — packet loss.')
         return self.curr_bck
 
     def close(self):

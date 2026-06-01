@@ -18,7 +18,6 @@ class Constants:
     WSPD_A: float
     WSPD_B: float
     MEAN: int
-    CHANGE_DIR_NUM_SHOTS: int
     RPM: int
 
 
@@ -55,7 +54,6 @@ def load_config(path: str) -> AppConfig:
         WSPD_A=cfg.getfloat("constants", "WSPD_A"),
         WSPD_B=cfg.getfloat("constants", "WSPD_B"),
         MEAN=cfg.getint("constants", "MEAN"),
-        CHANGE_DIR_NUM_SHOTS=cfg.getint("constants", "CHANGE_DIR_NUM_SHOTS"),
         RPM=cfg.getint("constants", "RPM"),
     )
 
