@@ -871,11 +871,14 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
             r_idx = np.clip(msh[i][0][0], 0, cst.ARDP - 1)   # (2*ASP, 2*ASP) int32
             cbck[i] *= C_arr[r_idx][None, :, :]               # broadcast over N_SHOTS
 
-        # Corrected last_bck for ring_sig and wind direction
-        last_bck_sh = last_bck * C_arr[None, :]
-        _, wdir_sh  = calc_wspd(last_bck_sh)
-        ring_sig_sh = float(np.std(
-            last_bck_sh[:, max(0, cst.ADP - cst.ASP): cst.ADP + cst.ASP]))
+        # Shadow correction is range-only (azimuth-uniform) → wdir unchanged.
+        # Correct only the ring slice needed for ring_sig (ADP±ASP), which
+        # is always within [0, ARDP-1] — safe to index C_arr directly.
+        wdir_sh = wdir
+        _r_lo = max(0, cst.ADP - cst.ASP)
+        _r_hi = min(cst.ADP + cst.ASP, len(C_arr))
+        ring_sh = last_bck[:, _r_lo:_r_hi] * C_arr[_r_lo:_r_hi][None, :]
+        ring_sig_sh = float(np.std(ring_sh))
 
         # Rebuild 3D spectrum from shadow-corrected cbck
         spec_3d_corr_sh = np.zeros((half, 2 * cst.K_NUM, 2 * cst.K_NUM), dtype=np.float32)
@@ -1059,6 +1062,7 @@ def main():
     os.makedirs(pics_dir,   exist_ok=True)
 
     df = pd.read_csv(args.csv)
+    df = df[df["bswh"].notna()]
     if 'pulse' in df.columns:
         df['pulse'] = df['pulse'].apply(_pulse_str)
 
