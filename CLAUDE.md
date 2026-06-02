@@ -240,7 +240,7 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 | `requirements-win.txt` | numpy, scipy, netCDF4, cftime — минимум для Windows-бандла |
 | `.github/workflows/build-windows.yml` | GHA: Windows x64 → артефакт `seavision-windows-x64` |
 | `udp_protocol.docx` | **Авторитетный** протокол v2.0 |
-| `batch_process.py` | Пакетная обработка; `_MAX_CURRENT=3.0`, `_SIGNAL_BAND=10` |
+| `batch_process.py` | Пакетная обработка; `_SIGNAL_BAND=10`, `_MAX_CURRENT=3.0`, `_H_RADAR=24.0`; двухпроходная shadow-коррекция (pass 2 использует `Ux,Uy` из pass 1); `_load_frames` возвращает `msh`; в params.csv добавлены колонки `snr_tot`, `m0`, `snr_tot_k` и суффикс `_sh` для shadow-pass |
 | `batch_process_parallel.py` | Параллельная обёртка (multiprocessing / SLURM) |
 
 ### Устаревшие файлы

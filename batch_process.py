@@ -22,7 +22,6 @@ import traceback
 import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
-from scipy.special import erfc as _erfc
 
 from src.config import load_config
 from src.io.input import NCInputSource
@@ -41,10 +40,6 @@ from src.runtime.logger import setup_logger
 
 _SIGNAL_BAND  = 10    # must match processor.py
 _MAX_CURRENT  = 3.0   # physical clip for ocean current [m/s]
-
-_H_RADAR      = 24.0  # radar antenna height above sea level [m]
-_SIGMA_S_MIN  = 0.005 # minimum RMS slope (flat-sea guard)
-_C_SHADOW_MAX = 3.0   # maximum shadow correction factor (safety clip)
 
 # Quality thresholds — algorithm version constants, same as processor.py
 # WIND_SIG_MIN is installation-dependent and read from cst.WIND_SIG_MIN
@@ -70,9 +65,6 @@ _PARAMS_FIELDS = [
     "wind_sig", "wind_dir",
     "sog_proc", "cog_proc", "hdg_proc",
     "swh_buoy", "t_peak_buoy", "t_mean_buoy", "dp_buoy", "dm_buoy",
-    "snr_tot", "m0", "snr_tot_k",
-    "swh_sh", "t_p_sh", "snr_tot_sh", "m0_sh", "snr_tot_k_sh",
-    "wspd_sh", "ring_sig_sh", "quality_sh", "sigma_s_sh", "f_shadow_sh",
 ]
 
 
@@ -301,6 +293,80 @@ def _compute_buoy_spectra(buoy_raw, n_freq, om_max):
         'dp_buoy':     dp_buoy,
         'dm_buoy':     dm_buoy,
     }
+
+
+# ── buoy spectrum → radar grid ───────────────────────────────────────────────
+
+def _remap_ewdm_to_radar_grid(ewdm_out, om_max, n_dirs, n_freq):
+    """
+    Remap EWDM directional spectrum onto the radar output grid.
+
+    Frequency axis: n_freq bins, ω ∈ [0, om_max] rad/s (same as radar spec_2d cols).
+    Direction axis: n_dirs bins, 0–(360-step)° in math convention (0=East, CCW).
+
+    EWDM direction convention assumed: direction FROM which waves come,
+    compass (0°=North, clockwise).
+    Conversion to radar propagation direction (TO, math):
+        θ_math = (270 − θ_ewdm_from) % 360
+
+    Returns (n_dirs, n_freq) int [0..255], or None on failure.
+    """
+    if ewdm_out is None:
+        return None
+    try:
+        S = np.asarray(ewdm_out.directional_spectrum.values, dtype=float)
+        if S.ndim == 3:
+            S = S.mean(axis=0)          # time-average → (n_freq_e, n_dir_e)
+        if S.ndim != 2 or S.size == 0:
+            return None
+        S = np.maximum(S, 0.0)
+
+        freq_e = np.asarray(ewdm_out.frequency.values, dtype=float)   # Hz
+        dirs_e = np.asarray(ewdm_out.direction.values, dtype=float) % 360.0
+
+        # Convert EWDM "FROM compass" → radar "TO math"
+        dirs_math = (270.0 - dirs_e) % 360.0
+
+        # Target grids
+        out_om = np.linspace(0.0, om_max, n_freq)          # rad/s
+        out_f  = out_om / (2.0 * np.pi)                    # Hz
+        out_d  = np.linspace(0.0, 360.0, n_dirs, endpoint=False)  # math degrees
+
+        # ── Step 1: frequency interpolation (per direction) ───────────────────
+        sort_f  = np.argsort(freq_e)
+        freq_s  = freq_e[sort_f]
+        S_fs    = S[sort_f, :]                              # (n_freq_e, n_dir_e)
+        S_fi    = np.zeros((n_freq, S_fs.shape[1]))         # (n_freq, n_dir_e)
+        for j in range(S_fs.shape[1]):
+            S_fi[:, j] = np.interp(out_f, freq_s, S_fs[:, j], left=0.0, right=0.0)
+
+        # ── Step 2: circular direction interpolation ──────────────────────────
+        sort_d   = np.argsort(dirs_math)
+        dirs_ms  = dirs_math[sort_d]                        # sorted math dirs
+        S_ds     = S_fi[:, sort_d]                          # (n_freq, n_dir_e)
+
+        PAD      = min(8, len(dirs_ms) // 4)
+        dirs_ext = np.concatenate([dirs_ms[-PAD:] - 360.0, dirs_ms, dirs_ms[:PAD] + 360.0])
+        S_ext    = np.hstack([S_ds[:, -PAD:], S_ds, S_ds[:, :PAD]])  # (n_freq, n_dir_e+2*PAD)
+
+        result = np.zeros((n_dirs, n_freq), dtype=np.float32)
+        for i, d in enumerate(out_d):
+            idx = int(np.searchsorted(dirs_ext, d, side='right')) - 1
+            idx = max(0, min(idx, len(dirs_ext) - 2))
+            denom = dirs_ext[idx + 1] - dirs_ext[idx]
+            t     = float((d - dirs_ext[idx]) / denom) if denom > 0 else 0.0
+            t     = max(0.0, min(t, 1.0))
+            result[i, :] = (1.0 - t) * S_ext[:, idx] + t * S_ext[:, idx + 1]
+
+        mx = float(result.max())
+        if mx > 0:
+            result = result / mx * 255.0
+        return result.astype(int)
+
+    except Exception as exc:
+        print(f'[buoy_remap] failed: {exc}')
+        traceback.print_exc()
+        return None
 
 
 # ── figure ────────────────────────────────────────────────────────────────────
@@ -718,7 +784,6 @@ def _load_frames(name, nc_path, pulse, cfg, log):
         'cog_mean':  float(np.degrees(np.arctan2(cog_sin_acc, cog_cos_acc)) % 360),
         'hdg_mean':  float(np.degrees(np.arctan2(hdg_sin_acc, hdg_cos_acc)) % 360),
         'buoy_proc': buoy_proc,
-        'msh':       msh,
     }
 
 
@@ -804,16 +869,6 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         s_om_th, peak_dir, mean_dir     = calc_spec2d(
             spec_3d_fixed, omega_vals, k_max, cst.N_DIRS, band=_SIGNAL_BAND)
 
-        # k-restricted SNR: limit integration to the physically meaningful wavenumber band
-        # (same bounds as current estimation); excludes high-k whitecapping noise that
-        # inflates the noise integral at high sea states and suppresses snr_tot
-        _k_lo = max(1, round(0.08 * cst.K_NUM))
-        _k_hi = round(0.45 * cst.K_NUM)
-        _sig_k = signal_mtf.copy(); _sig_k[:, :_k_lo] = 0.0; _sig_k[:, _k_hi:] = 0.0
-        _noi_k = noise.copy();      _noi_k[:, :_k_lo] = 0.0; _noi_k[:, _k_hi:] = 0.0
-        snr_tot_k = compute_snr(_sig_k, _noi_k)
-        del _sig_k, _noi_k
-
         swh = 0.01 * (cst.SNR_A + cst.SNR_B * np.sqrt(snr_tot))
         sys = calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh)
 
@@ -842,79 +897,6 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
                                                         sog=sog_mean, cog_deg=cog_mean)
 
         wspd = 0.01 * float(cst.WSPD_A + cst.WSPD_B * wind_sig)
-
-        # ── Shadow correction — pass 2 ────────────────────────────────────────
-        # Estimate surface RMS slope σ_s from pass-1 peak period and SWH,
-        # build a range-dependent correction factor C(r) = 1/(1−f_shadow(r)),
-        # apply it in-place to cbck (modifies the array for pass-2 FFT only),
-        # then rerun the spectral chain from spec_3d onward.
-        # Current vector (Ux, Uy) is reused from pass 1 — shadow correction
-        # does not shift spectral energy in ω-k, only rescales amplitude.
-        _om_pk  = 2.0 * np.pi / max(T_peak, 1.0)
-        _k_pk   = _om_pk ** 2 / 9.81
-        sigma_s = max(_k_pk * max(swh, 0.0) / (2.0 * np.sqrt(2.0)), _SIGMA_S_MIN)
-
-        _r_m  = (np.arange(cst.ARDP, dtype=np.float64) + 0.5) * step   # bin centres [m]
-        _f_sh = 0.5 * _erfc(_H_RADAR / (np.sqrt(2.0) * sigma_s * _r_m))
-        C_arr = np.clip(1.0 / np.clip(1.0 - _f_sh, 1.0 / _C_SHADOW_MAX, 1.0),
-                        1.0, _C_SHADOW_MAX).astype(np.float32)
-
-        # f_shadow at segment centre — saved as diagnostic column
-        f_shadow_diag = float(0.5 * _erfc(
-            _H_RADAR / (np.sqrt(2.0) * sigma_s * cst.ADP * step)))
-
-        # Apply range-dependent correction to cbck in-place.
-        # msh[i][0][0] are the range-pixel indices used during bilinear extraction
-        # (shape 2*ASP × 2*ASP), directly usable to index C_arr.
-        msh = frames['msh']
-        for i in range(cst.NUM_AREA):
-            r_idx = np.clip(msh[i][0][0], 0, cst.ARDP - 1)   # (2*ASP, 2*ASP) int32
-            cbck[i] *= C_arr[r_idx][None, :, :]               # broadcast over N_SHOTS
-
-        # Shadow correction is range-only (azimuth-uniform) → wdir unchanged.
-        # Correct only the ring slice needed for ring_sig (ADP±ASP), which
-        # is always within [0, ARDP-1] — safe to index C_arr directly.
-        wdir_sh = wdir
-        _r_lo = max(0, cst.ADP - cst.ASP)
-        _r_hi = min(cst.ADP + cst.ASP, len(C_arr))
-        ring_sh = last_bck[:, _r_lo:_r_hi] * C_arr[_r_lo:_r_hi][None, :]
-        ring_sig_sh = float(np.std(ring_sh))
-
-        # Rebuild 3D spectrum from shadow-corrected cbck
-        spec_3d_corr_sh = np.zeros((half, 2 * cst.K_NUM, 2 * cst.K_NUM), dtype=np.float32)
-        for i in range(cst.NUM_AREA):
-            spec_3d_corr_sh += calc_spec3d(cbck[i], cst.K_NUM)
-        spec_3d_corr_sh /= cst.NUM_AREA
-
-        spec_3d_fixed_sh  = apply_doppler_3d_vec(spec_3d_corr_sh, k_max, Ux, Uy, om_max)
-        port_fixed_sh, _  = calc_port(spec_3d_fixed_sh)
-        signal_sh, noise_sh = separate_signal_noise(
-            port_fixed_sh, k_vals, om_max, band=_SIGNAL_BAND)
-        signal_mtf_sh     = apply_mtf(signal_sh, k_vals, exp=1.2)
-
-        snr_tot_sh = compute_snr(signal_mtf_sh, noise_sh)
-        s_omega_sh, m0_sh, T_peak_sh, _ = compute_frequency_spectrum(
-            signal_mtf_sh, k_vals, omega_vals)
-        s_om_th_sh, _, _ = calc_spec2d(
-            spec_3d_fixed_sh, omega_vals, k_max, cst.N_DIRS, band=_SIGNAL_BAND)
-
-        _sig_k_sh = signal_mtf_sh.copy()
-        _sig_k_sh[:, :_k_lo] = 0.0;  _sig_k_sh[:, _k_hi:] = 0.0
-        _noi_k_sh = noise_sh.copy()
-        _noi_k_sh[:, :_k_lo] = 0.0;  _noi_k_sh[:, _k_hi:] = 0.0
-        snr_tot_k_sh = compute_snr(_sig_k_sh, _noi_k_sh)
-        del _sig_k_sh, _noi_k_sh, spec_3d_corr_sh, spec_3d_fixed_sh, port_fixed_sh
-
-        swh_sh  = 0.01 * (cst.SNR_A + cst.SNR_B * np.sqrt(snr_tot_sh))
-        sys_sh  = calc_partitions(s_om_th_sh, omega_vals, dir_array, wdir_sh, swh_sh)
-        wspd_sh = 0.01 * float(cst.WSPD_A + cst.WSPD_B * ring_sig_sh)
-
-        quality_sh = int(
-            snr_tot_sh  >= _SNR_QUALITY_MIN
-            and ring_sig_sh >= cst.WIND_SIG_MIN
-            and T_peak_sh   >= _T_PEAK_MIN
-            and sys_sh["n_sys"] >= 1
-        )
 
         # Wind direction from ERA5 u_10/v_10 (FROM direction, compass)
         wdir_meta = None
@@ -976,6 +958,15 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         try:
             np.save(os.path.join(spec_dir, f'{name}_freqspec.npy'), spec_1d)
             np.save(os.path.join(spec_dir, f'{name}_dirspec.npy'),  spec_2d)
+            if buoy_proc is not None:
+                buoy_freq = buoy_proc.get('s_freq_255')
+                if buoy_freq is not None:
+                    np.save(os.path.join(spec_dir, f'{name}_buoy_freqspec.npy'),
+                            np.asarray(buoy_freq, dtype=int))
+                buoy_dir = _remap_ewdm_to_radar_grid(
+                    buoy_proc.get('ewdm'), om_max, cst.N_DIRS, cst.N_FREQ)
+                if buoy_dir is not None:
+                    np.save(os.path.join(spec_dir, f'{name}_buoy_dirspec.npy'), buoy_dir)
         except Exception as exc:
             log.warning(f'{name}: spec save failed: {exc}')
 
@@ -1018,19 +1009,6 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         't_mean_buoy': _bp('t_mean_buoy'),
         'dp_buoy':     _bp('dp_buoy'),
         'dm_buoy':     _bp('dm_buoy'),
-        'snr_tot':     float(snr_tot),
-        'm0':          float(m0),
-        'snr_tot_k':   float(snr_tot_k),
-        'swh_sh':      float(swh_sh),
-        't_p_sh':      float(T_peak_sh),
-        'snr_tot_sh':  float(snr_tot_sh),
-        'm0_sh':       float(m0_sh),
-        'snr_tot_k_sh': float(snr_tot_k_sh),
-        'wspd_sh':     float(wspd_sh),
-        'ring_sig_sh': float(ring_sig_sh),
-        'quality_sh':  int(quality_sh),
-        'sigma_s_sh':  float(sigma_s),
-        'f_shadow_sh': float(f_shadow_diag),
     }
     return row, spec_1d, spec_2d
 
