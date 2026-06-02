@@ -22,6 +22,7 @@ import traceback
 import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
+from scipy.special import erfc as _erfc
 
 from src.config import load_config
 from src.io.input import NCInputSource
@@ -40,6 +41,10 @@ from src.runtime.logger import setup_logger
 
 _SIGNAL_BAND  = 10    # must match processor.py
 _MAX_CURRENT  = 3.0   # physical clip for ocean current [m/s]
+
+_H_RADAR      = 24.0  # radar antenna height above sea level [m]
+_SIGMA_S_MIN  = 0.005 # minimum RMS slope (flat-sea guard)
+_C_SHADOW_MAX = 3.0   # maximum shadow correction factor (safety clip)
 
 # Quality thresholds — algorithm version constants, same as processor.py
 # WIND_SIG_MIN is installation-dependent and read from cst.WIND_SIG_MIN
@@ -66,6 +71,8 @@ _PARAMS_FIELDS = [
     "sog_proc", "cog_proc", "hdg_proc",
     "swh_buoy", "t_peak_buoy", "t_mean_buoy", "dp_buoy", "dm_buoy",
     "snr_tot", "m0", "snr_tot_k",
+    "swh_sh", "t_p_sh", "snr_tot_sh", "m0_sh", "snr_tot_k_sh",
+    "wspd_sh", "ring_sig_sh", "quality_sh", "sigma_s_sh", "f_shadow_sh",
 ]
 
 
@@ -591,7 +598,7 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
         ['Wind Hs [m]',  f"{ws['h_s']:.3f}"  if ws  else '—',
          'Wind Tp [s]',  f"{ws['t_p']:.2f}"  if ws  else '—',
          'Wind Dp [°]',  f"{ws['d_p']:.1f}"  if ws  else '—',
-         'Wind Tm [s]',  f"{ws['t_m']:.2f}"  if ws  else '—',
+         'Wind Tm [s]',  f"{ws.get('t_m', 0.0):.2f}"  if ws  else '—',
          'Ux [m/s]',     f'{Ux:.3f}',
          'Uy [m/s]',     f'{Uy:.3f}'],
         ['Sw1 Hs [m]',   f"{sw1['h_s']:.3f}" if sw1 else '—',
@@ -711,6 +718,7 @@ def _load_frames(name, nc_path, pulse, cfg, log):
         'cog_mean':  float(np.degrees(np.arctan2(cog_sin_acc, cog_cos_acc)) % 360),
         'hdg_mean':  float(np.degrees(np.arctan2(hdg_sin_acc, hdg_cos_acc)) % 360),
         'buoy_proc': buoy_proc,
+        'msh':       msh,
     }
 
 
@@ -835,6 +843,76 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
 
         wspd = 0.01 * float(cst.WSPD_A + cst.WSPD_B * wind_sig)
 
+        # ── Shadow correction — pass 2 ────────────────────────────────────────
+        # Estimate surface RMS slope σ_s from pass-1 peak period and SWH,
+        # build a range-dependent correction factor C(r) = 1/(1−f_shadow(r)),
+        # apply it in-place to cbck (modifies the array for pass-2 FFT only),
+        # then rerun the spectral chain from spec_3d onward.
+        # Current vector (Ux, Uy) is reused from pass 1 — shadow correction
+        # does not shift spectral energy in ω-k, only rescales amplitude.
+        _om_pk  = 2.0 * np.pi / max(T_peak, 1.0)
+        _k_pk   = _om_pk ** 2 / 9.81
+        sigma_s = max(_k_pk * max(swh, 0.0) / (2.0 * np.sqrt(2.0)), _SIGMA_S_MIN)
+
+        _r_m  = (np.arange(cst.ARDP, dtype=np.float64) + 0.5) * step   # bin centres [m]
+        _f_sh = 0.5 * _erfc(_H_RADAR / (np.sqrt(2.0) * sigma_s * _r_m))
+        C_arr = np.clip(1.0 / np.clip(1.0 - _f_sh, 1.0 / _C_SHADOW_MAX, 1.0),
+                        1.0, _C_SHADOW_MAX).astype(np.float32)
+
+        # f_shadow at segment centre — saved as diagnostic column
+        f_shadow_diag = float(0.5 * _erfc(
+            _H_RADAR / (np.sqrt(2.0) * sigma_s * cst.ADP * step)))
+
+        # Apply range-dependent correction to cbck in-place.
+        # msh[i][0][0] are the range-pixel indices used during bilinear extraction
+        # (shape 2*ASP × 2*ASP), directly usable to index C_arr.
+        msh = frames['msh']
+        for i in range(cst.NUM_AREA):
+            r_idx = np.clip(msh[i][0][0], 0, cst.ARDP - 1)   # (2*ASP, 2*ASP) int32
+            cbck[i] *= C_arr[r_idx][None, :, :]               # broadcast over N_SHOTS
+
+        # Corrected last_bck for ring_sig and wind direction
+        last_bck_sh = last_bck * C_arr[None, :]
+        _, wdir_sh  = calc_wspd(last_bck_sh)
+        ring_sig_sh = float(np.std(
+            last_bck_sh[:, max(0, cst.ADP - cst.ASP): cst.ADP + cst.ASP]))
+
+        # Rebuild 3D spectrum from shadow-corrected cbck
+        spec_3d_corr_sh = np.zeros((half, 2 * cst.K_NUM, 2 * cst.K_NUM), dtype=np.float32)
+        for i in range(cst.NUM_AREA):
+            spec_3d_corr_sh += calc_spec3d(cbck[i], cst.K_NUM)
+        spec_3d_corr_sh /= cst.NUM_AREA
+
+        spec_3d_fixed_sh  = apply_doppler_3d_vec(spec_3d_corr_sh, k_max, Ux, Uy, om_max)
+        port_fixed_sh, _  = calc_port(spec_3d_fixed_sh)
+        signal_sh, noise_sh = separate_signal_noise(
+            port_fixed_sh, k_vals, om_max, band=_SIGNAL_BAND)
+        signal_mtf_sh     = apply_mtf(signal_sh, k_vals, exp=1.2)
+
+        snr_tot_sh = compute_snr(signal_mtf_sh, noise_sh)
+        s_omega_sh, m0_sh, T_peak_sh, _ = compute_frequency_spectrum(
+            signal_mtf_sh, k_vals, omega_vals)
+        s_om_th_sh, _, _ = calc_spec2d(
+            spec_3d_fixed_sh, omega_vals, k_max, cst.N_DIRS, band=_SIGNAL_BAND)
+
+        _sig_k_sh = signal_mtf_sh.copy()
+        _sig_k_sh[:, :_k_lo] = 0.0;  _sig_k_sh[:, _k_hi:] = 0.0
+        _noi_k_sh = noise_sh.copy()
+        _noi_k_sh[:, :_k_lo] = 0.0;  _noi_k_sh[:, _k_hi:] = 0.0
+        snr_tot_k_sh = compute_snr(_sig_k_sh, _noi_k_sh)
+        del _sig_k_sh, _noi_k_sh, spec_3d_corr_sh, spec_3d_fixed_sh, port_fixed_sh
+
+        swh_sh  = 0.01 * (cst.SNR_A + cst.SNR_B * np.sqrt(snr_tot_sh))
+        sys_sh  = calc_partitions(s_om_th_sh, omega_vals, dir_array, wdir_sh, swh_sh)
+        wspd_sh = 0.01 * float(cst.WSPD_A + cst.WSPD_B * ring_sig_sh)
+
+        quality_sh = int(
+            snr_tot_sh  >= _SNR_QUALITY_MIN
+            and ring_sig_sh >= cst.WIND_SIG_MIN
+            and T_peak_sh   >= _T_PEAK_MIN
+            and sys_sh["n_sys"] >= 1
+        )
+
         # Wind direction from ERA5 u_10/v_10 (FROM direction, compass)
         wdir_meta = None
         if wind_meta:
@@ -940,6 +1018,16 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         'snr_tot':     float(snr_tot),
         'm0':          float(m0),
         'snr_tot_k':   float(snr_tot_k),
+        'swh_sh':      float(swh_sh),
+        't_p_sh':      float(T_peak_sh),
+        'snr_tot_sh':  float(snr_tot_sh),
+        'm0_sh':       float(m0_sh),
+        'snr_tot_k_sh': float(snr_tot_k_sh),
+        'wspd_sh':     float(wspd_sh),
+        'ring_sig_sh': float(ring_sig_sh),
+        'quality_sh':  int(quality_sh),
+        'sigma_s_sh':  float(sigma_s),
+        'f_shadow_sh': float(f_shadow_diag),
     }
     return row, spec_1d, spec_2d
 
