@@ -65,6 +65,7 @@ _PARAMS_FIELDS = [
     "wind_sig", "wind_dir",
     "sog_proc", "cog_proc", "hdg_proc",
     "swh_buoy", "t_peak_buoy", "t_mean_buoy", "dp_buoy", "dm_buoy",
+    "snr_tot", "m0", "snr_tot_k",
 ]
 
 
@@ -795,6 +796,16 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         s_om_th, peak_dir, mean_dir     = calc_spec2d(
             spec_3d_fixed, omega_vals, k_max, cst.N_DIRS, band=_SIGNAL_BAND)
 
+        # k-restricted SNR: limit integration to the physically meaningful wavenumber band
+        # (same bounds as current estimation); excludes high-k whitecapping noise that
+        # inflates the noise integral at high sea states and suppresses snr_tot
+        _k_lo = max(1, round(0.08 * cst.K_NUM))
+        _k_hi = round(0.45 * cst.K_NUM)
+        _sig_k = signal_mtf.copy(); _sig_k[:, :_k_lo] = 0.0; _sig_k[:, _k_hi:] = 0.0
+        _noi_k = noise.copy();      _noi_k[:, :_k_lo] = 0.0; _noi_k[:, _k_hi:] = 0.0
+        snr_tot_k = compute_snr(_sig_k, _noi_k)
+        del _sig_k, _noi_k
+
         swh = 0.01 * (cst.SNR_A + cst.SNR_B * np.sqrt(snr_tot))
         sys = calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh)
 
@@ -902,10 +913,10 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         't_m':      float(T_mean),
         'd_p':      float(peak_dir),
         'd_m':      float(mean_dir),
-        'wswh':     float(ws['h_s']) if ws else 0.0,
-        'wt_p':     float(ws['t_p']) if ws else 0.0,
-        'wt_m':     float(ws['t_m']) if ws else 0.0,
-        'wd_p':     float(ws['d_p']) if ws else 0.0,
+        'wswh':     float(ws['h_s'])           if ws else 0.0,
+        'wt_p':     float(ws['t_p'])           if ws else 0.0,
+        'wt_m':     float(ws.get('t_m', 0.0)) if ws else 0.0,
+        'wd_p':     float(ws['d_p'])           if ws else 0.0,
         **_sys_fields('sw1', sys.get('sw_1')),
         **_sys_fields('sw2', sys.get('sw_2')),
         'ide_sys':    int(sys['n_sys']),
@@ -926,6 +937,9 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         't_mean_buoy': _bp('t_mean_buoy'),
         'dp_buoy':     _bp('dp_buoy'),
         'dm_buoy':     _bp('dm_buoy'),
+        'snr_tot':     float(snr_tot),
+        'm0':          float(m0),
+        'snr_tot_k':   float(snr_tot_k),
     }
     return row, spec_1d, spec_2d
 

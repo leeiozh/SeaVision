@@ -36,8 +36,6 @@ python batch_process_parallel.py --merge-only --out batch_out
 # → push в origin/main или ручной запуск workflow "Build Windows EXE"
 # → скачать артефакт seavision-windows-x64 → положить config.ini рядом с seavision.exe
 
-# Диагностика мультиволнового пайплайна на одном NC-файле
-python debug_multiwave.py   # путь NC захардкожен внутри, вывод → ./debug_out/
 ```
 
 Нет системы тестов и линтера — тестирование через `tester_receive.py` с живыми данными или файлами.
@@ -193,7 +191,8 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 | [21] | H | wind_dir | °, математическая конвенция |
 | [22] | B | n_sys | 0–3 |
 | [23] | B | quality | 0=BAD, 1=GOOD |
-| [24..27] | H×4 | reserved | =0 |
+| [24] | H | algo_version | `Constants.ALGO_VERSION`; инкрементировать при смене поведения алгоритма |
+| [25..27] | H×3 | reserved | =0 |
 | [28..91] | B×64 | spec_1d | [0–255] |
 | [92..] | B×1296 | spec_2d 36×36 | row-major: dir×freq |
 
@@ -230,18 +229,19 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 | `src/io/input.py` | `UdpInputSource` (get_bck возвращает copy), `NCInputSource`, `BT8InputSource` |
 | `src/io/service.py` | UDP-сокеты |
 | `src/runtime/manager.py` | Трёхпоточный пайплайн с watchdog |
+| `src/runtime/logger.py` | `setup_logger()` — настройка форматированного лога |
 | `config.ini` | Продакшн UDP (pics=false, type=udp) |
 | `config_debug.ini` | Отладка (type=nc, N_SHOTS=64, pics=./, file=true) |
 | `config_udp.ini` | Синоним config.ini (источник для копирования) |
 | `test/tester_receive.py` | Визуализация UDP v2.0: 1D спектр + полярный спектр + таблица |
 | `test/tester_transmit.py` | Генератор тестового потока |
 | `seavision-win.spec` | PyInstaller onedir для Windows (без matplotlib, без UPX) |
+| `seavision.spec` | PyInstaller spec для локальной сборки (Linux/общий) |
 | `requirements-win.txt` | numpy, scipy, netCDF4, cftime — минимум для Windows-бандла |
 | `.github/workflows/build-windows.yml` | GHA: Windows x64 → артефакт `seavision-windows-x64` |
 | `udp_protocol.docx` | **Авторитетный** протокол v2.0 |
 | `batch_process.py` | Пакетная обработка; `_MAX_CURRENT=3.0`, `_SIGNAL_BAND=10` |
 | `batch_process_parallel.py` | Параллельная обёртка (multiprocessing / SLURM) |
-| `debug_multiwave.py` | Диагностика одного NC-файла |
 
 ### Устаревшие файлы
 `src/algorithms/portrait.py`, `src/algorithms/direction.py` — не импортируются. Не трогать.
@@ -267,7 +267,7 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 
 **Захардкожены в `load_config()`, не в config.ini** (версия алгоритма/протокола):
 ```
-N_FREQ=64  N_DIRS=36  K_NUM=32  NUM_AREA=8  N_FREQ_2D=36
+N_FREQ=64  N_DIRS=36  K_NUM=32  NUM_AREA=8  N_FREQ_2D=36  ALGO_VERSION=1
 ```
 
 Флаги качества (**захардкожены в коде**, одинаковы в `processor.py` и `batch_process.py`):
