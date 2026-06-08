@@ -40,6 +40,7 @@ def _save_debug_pic(
     swh=0.0, T_peak=0.0, T_mean=0.0, peak_dir=0.0,
     quality=0, snr_tot=0.0, wdir=0.0, wspd=0.0, wind_sig=0.0,
     pulse=0, n_sys=0,
+    raw_bck=None,
     path='.',
 ):
     """Single diagnostic figure combining 1D spectrum, polar directional spectrum,
@@ -62,11 +63,11 @@ def _save_debug_pic(
     curr_speed  = float(np.hypot(u_curr_x, u_curr_y))
     curr_dir    = float(np.degrees(np.arctan2(u_curr_x, u_curr_y)) % 360)
 
-    fig = Figure(figsize=(16, 9))
+    fig = Figure(figsize=(21, 9))
     FigureCanvasAgg(fig)
-    gs = GridSpec(2, 3, figure=fig, height_ratios=[3, 1.2],
+    gs = GridSpec(2, 4, figure=fig, height_ratios=[3, 1.2],
                   hspace=0.22, wspace=0.22,
-                  left=0.06, right=0.97, top=0.95, bottom=0.04)
+                  left=0.05, right=0.98, top=0.95, bottom=0.04)
 
     f_axis = omega_vals / (2 * np.pi)
     f_max  = float(omega_vals[-1]) / (2 * np.pi)
@@ -183,6 +184,27 @@ def _save_debug_pic(
     ax2.tick_params(colors='white')
     for sp in ax2.spines.values(): sp.set_edgecolor('#555555')
 
+    # ── [0,3] raw backscatter (last frame, unprocessed) ──────────────────────
+    ax4 = fig.add_subplot(gs[0, 3])
+    ax4.set_facecolor('#111111')
+    if raw_bck is not None:
+        raw = np.asarray(raw_bck)
+        # decimate for display — full frame is (AAP, ARDP) ≈ 4096×2048
+        step_y = max(1, raw.shape[0] // 1024)
+        step_x = max(1, raw.shape[1] // 1024)
+        raw_disp = raw[::step_y, ::step_x]
+        vmax_r = float(np.percentile(raw_disp, 99)) or 1.0
+        ax4.imshow(raw_disp, aspect='auto', origin='lower', cmap='gray',
+                   vmin=0, vmax=vmax_r, interpolation='none')
+        ax4.set_xlabel('range [px]', color='white')
+        ax4.set_ylabel('azimuth [px]', color='white')
+    else:
+        ax4.text(0.5, 0.5, 'no raw frame', color='#888888',
+                 ha='center', va='center', transform=ax4.transAxes)
+    ax4.set_title('Raw backscatter (last frame)', color='white', fontsize=9)
+    ax4.tick_params(colors='white')
+    for sp in ax4.spines.values(): sp.set_edgecolor('#555555')
+
     # ── [1,:] parameter table ────────────────────────────────────────────────
     ax3 = fig.add_subplot(gs[1, :])
     ax3.axis('off'); ax3.set_facecolor('#111111')
@@ -228,6 +250,7 @@ def _save_debug_pic(
     tbl[1, 1].get_text().set_color('white')
 
     try:
+        os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
         fig.savefig(out_path, dpi=120, bbox_inches='tight',
                     facecolor=fig.get_facecolor())
     except Exception:
@@ -493,7 +516,8 @@ class Processor:
                     port_corr, k_vals, k_max, Ux, Uy, sys_scatter, sog=sog_mean, cog_deg=cog_mean,
                     swh=swh, T_peak=T_peak, T_mean=T_mean, peak_dir=peak_dir,
                     quality=quality, snr_tot=snr_tot, wdir=wdir,
-                    wspd=wspd, wind_sig=ring_sig, pulse=s.curr_pulse, n_sys=sys["n_sys"], path=_pics,
+                    wspd=wspd, wind_sig=ring_sig, pulse=s.curr_pulse, n_sys=sys["n_sys"],
+                    raw_bck=bck, path=_pics,
                 )
 
             self.averager.push(wave_out, port_fixed)
