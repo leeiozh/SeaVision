@@ -5,6 +5,12 @@ _FRAME_SIZE_BYTES = 4096 * 2 * 1032   # ≈ 8.45 MB
 
 
 def create_inp_socket(ip, port, size=0):
+    """Create, configure, and bind a UDP receive socket.
+
+    size — receive buffer size in MB (0 = OS default).  Warns if the actual
+    buffer is smaller than one full radar frame (~8.45 MB).
+    Calls sys.exit(1) on bind failure.
+    """
     try:
         sock = socket(AF_INET, SOCK_DGRAM)
         if size != 0:
@@ -27,6 +33,7 @@ def create_inp_socket(ip, port, size=0):
 
 
 def create_out_socket(port, size=0):
+    """Create an unbound UDP send socket.  size — send buffer in MB (0 = OS default)."""
     try:
         sock = socket(AF_INET, SOCK_DGRAM)
         if size != 0:

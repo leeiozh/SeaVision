@@ -6,8 +6,8 @@ import numpy as np
 from netCDF4 import Dataset
 
 NETCDF_FILE = "/media/leeiozh/EZH/DATA/old_radar_data/0606_4392.nc"
-SERVER_IP = '192.168.192.201'
-# SERVER_IP = '127.0.0.1'
+# SERVER_IP = '192.168.192.201'
+SERVER_IP = '127.0.0.1'
 PRLI_PORT = 4001
 NAVI_PORT = 4002
 

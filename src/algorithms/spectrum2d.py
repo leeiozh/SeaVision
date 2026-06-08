@@ -64,31 +64,6 @@ def calc_port(spec_3d):
 
 # ── Doppler correction ────────────────────────────────────────────────────────
 
-def apply_doppler_2d(port, k_vals, u_proj, omega_vals):
-    """
-    Shift each k-column of the omega-k portrait by the Doppler amount.
-    port: (n_om, n_k);  k_vals: (n_k,);  omega_vals: (n_om,).
-    """
-    n_om = port.shape[0]
-    dom = omega_vals[1] - omega_vals[0]
-    shift = (-np.rint(k_vals * u_proj / dom)).astype(int)   # (n_k,)
-    idx = (np.arange(n_om)[:, None] - shift[None, :]) % n_om
-    return np.take_along_axis(port, idx, axis=0)
-
-
-def apply_doppler_3d(spec_3d, k_max, u_proj, om_max):
-    """Scalar Doppler correction (isotropic approximation). Prefer apply_doppler_3d_vec."""
-    n_om, n2, _ = spec_3d.shape
-    k_num = n2 // 2
-    kx = np.arange(-k_num, k_num, dtype=float)
-    ky = np.arange(-k_num, k_num, dtype=float)
-    KX, KY = np.meshgrid(kx, ky, indexing='ij')
-    k_abs = np.sqrt(KX ** 2 + KY ** 2) / k_num * k_max
-    shift = (-np.rint(k_abs * u_proj / om_max * n_om)).astype(int)
-    idx = (np.arange(n_om)[:, None, None] - shift[None]) % n_om
-    return np.take_along_axis(spec_3d, idx, axis=0)
-
-
 def apply_doppler_3d_vec(spec_3d, k_max, Ux, Uy, om_max):
     """
     Vectorial Doppler correction: each (kx, ky) cell is shifted by

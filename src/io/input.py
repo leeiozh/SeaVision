@@ -12,6 +12,12 @@ log = setup_logger("input")
 
 
 class InputSource:
+    """Abstract base for all radar data sources.
+
+    Subclasses must implement get_bck() and get_navi().
+    get_bck() returns BackData with step==0.0 to signal end-of-file.
+    """
+
     def get_bck(self) -> BackData:
         raise NotImplementedError
 
@@ -23,6 +29,17 @@ class InputSource:
 
 
 class UdpInputSource(InputSource):
+    """Live radar input over UDP.
+
+    Assembles a full BackData frame (AAP azimuth lines × ARDP range bins) from
+    the stream of 1032-byte backscatter packets.  Navigation packets are read
+    non-blocking on the same call; the last valid Navi is returned if none
+    arrive between two frames.
+
+    get_bck() blocks until either all lines are received or a timeout/duplicate
+    threshold is hit (indicating the next antenna rotation has started).
+    """
+
     def __init__(self, my_ip, back_port, navi_port, aap, ardp):
         self.back_socket = create_inp_socket(my_ip, back_port, 17)
         self.navi_socket = create_inp_socket(my_ip, navi_port, 2)
@@ -171,6 +188,12 @@ class UdpInputSource(InputSource):
 
 
 class NCInputSource(InputSource):
+    """Read pre-recorded radar frames from a NetCDF file sequentially.
+
+    get_bck() advances an internal frame index on each call and returns
+    BackData with step=0.0 once all frames have been delivered (EOF sentinel).
+    Navigation fields are read from matching dataset variables.
+    """
 
     def __init__(self, file_path):
         from netCDF4 import Dataset
@@ -201,6 +224,12 @@ class NCInputSource(InputSource):
 
 
 def read_bt8(fname, radar_xdim=4096, radar_ydim=4096):
+    """Parse one .bt8 binary file.
+
+    Returns (hdg, cog, sog, step, lat, lon, image) where image has shape
+    (radar_xdim, radar_ydim) uint8.  step is the range resolution [m/px]
+    decoded from header byte 10 (lookup table: 0→3.75, 1→7.5, …, 7→1.875 m).
+    """
     with open(fname, 'rb') as f:
         junk_chunk = f.read(64)
         head_byte = np.frombuffer(junk_chunk, dtype=np.uint8, count=23, offset=0)
@@ -232,6 +261,13 @@ def read_bt8(fname, radar_xdim=4096, radar_ydim=4096):
 
 
 class BT8InputSource(InputSource):
+    """Read pre-recorded radar frames from a folder of .bt8 binary files.
+
+    Files are sorted by name and processed in order from start_ind to end_ind.
+    When the last file is reached get_bck() checks for newly added files
+    (_rescan) and returns the EOF sentinel (step=0.0) if none are found.
+    Navigation data is embedded in the .bt8 header.
+    """
 
     def __init__(self, folder_path, aap, ardp, start_ind, end_ind, pulse):
         self.folder_path = folder_path

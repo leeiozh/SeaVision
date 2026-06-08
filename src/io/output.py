@@ -6,6 +6,8 @@ from src.io.structs import Wave, Navi, ProcessResult
 
 
 class OutputSink:
+    """Abstract base for all output destinations."""
+
     def send(self, result: ProcessResult):
         raise NotImplementedError
 
@@ -13,8 +15,30 @@ class OutputSink:
         pass
 
 
+def _u16(x):
+    """Clip a value to the uint16 range so struct.pack never raises."""
+    return int(np.clip(round(x), 0, 65535))
+
+
 class UdpOutputSink(OutputSink):
-    def __init__(self, server_ip, server_port, n_freqs, n_dirs, n_freq_2d, algo_version=1):
+    """Pack a ProcessResult into a UDP datagram and send it.
+
+    Two wire formats are supported, selected by ``protocol``:
+
+      "new" (default) — protocol v2.0, 1412 bytes:
+        52 bytes header | N_FREQ bytes spec_1d | N_DIRS×N_FREQ_2D bytes spec_2d.
+        See udp_protocol.docx for the authoritative field definitions.
+
+      "old" — legacy protocol (sv_protocol_2204.docx), 1398 bytes:
+        102 bytes header | N_FREQ bytes spec_1d | N_DIRS×N_FREQ_2D bytes spec_2d.
+        No pulse/step, no mean (t_m/d_m) fields, no n_sys/quality/algo_version.
+        Different scaling: rpm ×1000, wind speed ×100, current speed ×1000.
+
+    The legacy format is a temporary compatibility mode for older receivers.
+    """
+
+    def __init__(self, server_ip, server_port, n_freqs, n_dirs, n_freq_2d,
+                 algo_version=1, protocol="new"):
         self.out_socket = create_out_socket(server_port, 2)
         self.server_ip = server_ip
         self.server_port = server_port
@@ -22,9 +46,16 @@ class UdpOutputSink(OutputSink):
         self.n_dirs = n_dirs
         self.n_freq_2d = n_freq_2d
         self.algo_version = algo_version
+        self.protocol = str(protocol).lower()
 
     def send(self, result: ProcessResult):
-        o = result.output
+        if self.protocol == "old":
+            data = self._pack_old(result.output)
+        else:
+            data = self._pack_new(result.output)
+        self.out_socket.sendto(data, (self.server_ip, self.server_port))
+
+    def _pack_new(self, o):
         # Header layout (52 bytes):
         #   BB HH                   — type, pulse, step_mm, rpm_x100
         #   HHHHH                   — summary: swh, t_p, t_m, dir_p, dir_m
@@ -57,13 +88,73 @@ class UdpOutputSink(OutputSink):
             *o.spec_1d,
             *o.spec_2d.flatten(),
         )
-        self.out_socket.sendto(data, (self.server_ip, self.server_port))
+        return data
+
+    def _pack_old(self, o):
+        """Legacy 1398-byte layout (sv_protocol_2204.docx, little-endian).
+
+        Header (102 bytes):
+          B                  — type = 5
+          H×17               — summary(swh,t_p,dir_p), wind/sw1/sw2(swh,t_p,dir),
+                               wind(speed,dir), current(speed,dir), rpm
+          B                  — N_FREQ count
+          {N_FREQ}B          — spec_1d [0–255]
+          B B                — N_FREQ_2D count, N_DIRS count
+          {N_FREQ_2D×N_DIRS}B — spec_2d [0–255]
+
+        Scaling differs from v2.0: rpm in thousandths (×1000), wind speed in
+        hundredths of m/s (×100), current speed in thousandths of m/s (×1000).
+        Direction values keep the same convention emitted by the processor.
+        """
+        data = pack(
+            f"<B17HB{self.n_freqs}BBB{self.n_freq_2d * self.n_dirs}B",
+            5,
+            # summary — swh, t_p, dir_p
+            _u16(o.wave_sum.swh * 100), _u16(o.wave_sum.t_p * 100),
+            int(round(o.wave_sum.d_p)) % 360,
+            # wind wave — swh, t_p, dir_p
+            _u16(o.wave_win.swh * 100), _u16(o.wave_win.t_p * 100),
+            int(round(o.wave_win.d_p)) % 360,
+            # swell 1 — swh, t_p, dir_p
+            _u16(o.wave_sw1.swh * 100), _u16(o.wave_sw1.t_p * 100),
+            int(round(o.wave_sw1.d_p)) % 360,
+            # swell 2 — swh, t_p, dir_p
+            _u16(o.wave_sw2.swh * 100), _u16(o.wave_sw2.t_p * 100),
+            int(round(o.wave_sw2.d_p)) % 360,
+            # wind — speed (×100 → hundredths m/s), dir
+            _u16(getattr(o, 'wspd', 0.0) * 100),
+            int(round(getattr(o, 'wind_dir', 0.0))) % 360,
+            # current — speed (×1000 → thousandths m/s), dir
+            _u16(getattr(o, 'curr_speed', 0.0) * 1000),
+            int(round(getattr(o, 'curr_dir', 0.0))) % 360,
+            # antenna rate — thousandths of rpm (×1000)
+            _u16(o.rps * 1000),
+            # spec_1d
+            self.n_freqs,
+            *o.spec_1d,
+            # spec_2d
+            self.n_freq_2d, self.n_dirs,
+            *o.spec_2d.flatten(),
+        )
+        return data
 
     def close(self):
         self.out_socket.close()
 
 
 class CSVOutputSink(OutputSink):
+    """Write processing results to four CSV files per session.
+
+    Files are opened once at construction and kept open (buffering=1) for the
+    session lifetime.  Filenames: {installation_id}_{timestamp}_*.csv, or
+    {timestamp}_*.csv when installation_id is "default".
+
+      _params.csv — scalar wave parameters + 1-D spectrum per output cycle.
+      _port.csv   — ω-k portrait (N_SHOTS//2 × K_NUM), one block per cycle.
+      _spec.csv   — directional spectrum (N_DIRS × N_FREQ_2D), one block per cycle.
+      _navi.csv   — navigation snapshot per output cycle.
+    """
+
     def __init__(self, save_path, constants):
         self.save_path = save_path
         now_time = datetime.now()

@@ -32,6 +32,19 @@ python batch_process_parallel.py --n-workers 8
 python batch_process_parallel.py --task-id $SLURM_ARRAY_TASK_ID --n-tasks $SLURM_ARRAY_TASK_COUNT
 python batch_process_parallel.py --merge-only --out batch_out
 
+# Презентационные фигуры из batch-результатов
+python make_pres_figs.py [--csv META_upd2.csv] [--base-path PATH] [--out pres_figs] \
+                          [--config config.ini] [--n-files 5] [--style dark|light] \
+                          [--dpi 150] [--combined-only]
+# Выход: pres_figs/{omk,freq,dir,combined}_*.png
+
+# Сравнение радар vs буй (по результатам batch-обработки)
+python buoy/analyze.py [--csv buoy/params.csv] [--spec buoy/spec] [--out buoy/figs] \
+                       [--mode scatter spectra polar spreading autocorr] \
+                       [--quality-only] [--max-spectra 40] [--max-polar 12]
+# Физ. масштаб спектра из swh: S_phys(f) = S_norm(f)·(swh/4)²/(Σ S_norm·df)
+# Направленный разброс по Kuik 1988; индекс перекрытия спектров SOI ∈ [0,1]
+
 # Сборка Windows .exe через GitHub Actions
 # → push в origin/main или ручной запуск workflow "Build Windows EXE"
 # → скачать артефакт seavision-windows-x64 → положить config.ini рядом с seavision.exe
@@ -77,6 +90,16 @@ test/tester_receive.py      ← визуализация
 | `udp` | `UdpInputSource` | Живой радар. Принимает пакеты по 1032 байт, собирает AAP строк → один `BackData`. **`get_bck()` возвращает копию** `bck`-массива (защита от гонки данных между Input и Process потоками). |
 | `nc` | `NCInputSource` | NetCDF-файл. `back.step = 0.0` = признак EOF. |
 | `bt8` | `BT8InputSource` | Папка с бинарными BT8-файлами. |
+
+**Входной UDP-пакет бэкскаттера (тип 8, 1032 байта):**
+- Байты 0: тип = 8
+- Байты 1–2: номер строки (uint16)
+- Байты 3–4: разрешение step (uint16, мм×1000)
+- Байт 5: raw_part_value (1 → part_index=0, 2 → part_index=1)
+- Байт 7: длина импульса pulse
+- Байты 8–1031: 512 значений uint16 — половина одной строки AAP
+
+Каждая строка AAP передаётся двумя пакетами (part_index 0 и 1). `UdpInputSource` собирает их с дедупликацией через `ready_vec` (p0) и `part1_seen` (p1).
 
 `UdpInputSource` таймауты: `overall_timeout=30` с, `per_recv_timeout=2` с.
 `curr_navi` инициализируется дефолтным `Navi(0,0,0,0,0,0)` — не `None`.
@@ -201,6 +224,41 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 - `curr_dir` — **компасная**: 0°=Север, CW; `arctan2(East, North) % 360`
 - `spec_2d` строка i — математический угол i×10°
 
+### Старый UDP протокол — **1398 байт** (`sv_protocol_2204.docx`)
+
+Временный режим совместимости со старыми приёмниками. Включается ключом
+`protocol = old` в `[output]` (по умолчанию `new`). `UdpOutputSink._pack_old()`.
+
+```
+"<B17HB{N_FREQ}BBB{N_FREQ_2D×N_DIRS}B"
+ 102 байта заголовок + 64 байта spec_1d + 36×36 байт spec_2d
+```
+
+| Байт | Тип | Поле | Кодирование |
+|---|---|---|---|
+| 0 | B | type=5 | — |
+| 1 | H | swh_sum | м×100 |
+| 3 | H | t_p_sum | с×100 |
+| 5 | H | dir_p_sum | °, целые |
+| 7..11 | H×3 | wind: swh, t_p, dir_p | м×100 / с×100 / ° |
+| 13..17 | H×3 | sw1: swh, t_p, dir_p | аналогично |
+| 19..23 | H×3 | sw2: swh, t_p, dir_p | аналогично |
+| 25 | H | wind speed | **м/с×100** |
+| 27 | H | wind dir | °, целые |
+| 29 | H | current speed | **м/с×1000** |
+| 31 | H | current dir | °, целые |
+| 33 | H | rpm | **об/мин×1000** |
+| 35 | B | N_FREQ count | =64 |
+| 36..99 | B×64 | spec_1d | [0–255] |
+| 100 | B | N_FREQ_2D count | =36 |
+| 101 | B | N_DIRS count | =36 |
+| 102.. | B×1296 | spec_2d 36×36 | row-major: dir×freq |
+
+**Отличия от v2.0:** нет `pulse`/`step`, нет средних (`t_m`/`d_m`), нет
+`n_sys`/`quality`/`algo_version`/reserved. Иное масштабирование: rpm ×1000,
+скорость ветра ×100, скорость тока ×1000. Конвенции направлений сохраняются
+те же, что эмитит процессор (как в v2.0). Приёмник: `test/tester_receive_old.py`.
+
 **Авторитетный источник протокола**: `udp_protocol.docx` (v2.0).
 
 ### CSVOutputSink
@@ -233,18 +291,19 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 | `config.ini` | Продакшн UDP (pics=false, type=udp) |
 | `config_debug.ini` | Отладка (type=nc, N_SHOTS=64, pics=./, file=true) |
 | `config_udp.ini` | Синоним config.ini (источник для копирования) |
-| `test/tester_receive.py` | Визуализация UDP v2.0: 1D спектр + полярный спектр + таблица |
+| `test/tester_receive.py` | Визуализация UDP v2.0 (1412 байт): 1D спектр + полярный спектр + таблица |
+| `test/tester_receive_old.py` | Визуализация **старого** протокола (1398 байт, `sv_protocol_2204.docx`) |
 | `test/tester_transmit.py` | Генератор тестового потока |
 | `seavision-win.spec` | PyInstaller onedir для Windows (без matplotlib, без UPX) |
 | `seavision.spec` | PyInstaller spec для локальной сборки (Linux/общий) |
 | `requirements-win.txt` | numpy, scipy, netCDF4, cftime — минимум для Windows-бандла |
 | `.github/workflows/build-windows.yml` | GHA: Windows x64 → артефакт `seavision-windows-x64` |
-| `udp_protocol.docx` | **Авторитетный** протокол v2.0 |
-| `batch_process.py` | Пакетная обработка; `_SIGNAL_BAND=10`, `_MAX_CURRENT=3.0`, `_H_RADAR=24.0`; двухпроходная shadow-коррекция (pass 2 использует `Ux,Uy` из pass 1); `_load_frames` возвращает `msh`; в params.csv добавлены колонки `snr_tot`, `m0`, `snr_tot_k` и суффикс `_sh` для shadow-pass |
+| `udp_protocol.docx` | **Авторитетный** протокол v2.0 (новый) |
+| `sv_protocol_2204.docx` | Старый протокол (1398 байт), режим `protocol = old` |
+| `batch_process.py` | Пакетная обработка; `_SIGNAL_BAND=10`, `_MAX_CURRENT=3.0`; разделение на I/O (`_load_frames` → dict с `cbck`/navi/`buoy_proc`) и вычисление (`_compute_from_frames`); `params.csv` содержит поля из `_PARAMS_FIELDS` (включая `swh`, `t_p`, `d_p`, `curr_*`, `wspd_proc`, `u_x/u_y`, `swh_buoy` и др.); `wt_m` всегда 0.0, т.к. `calc_partitions` не возвращает `t_m` для систем; буй: окно `_BUOY_SKIP_SEC=420` (7 мин) — `_BUOY_END_SEC=2220` (37 мин) |
 | `batch_process_parallel.py` | Параллельная обёртка (multiprocessing / SLURM) |
+| `buoy/analyze.py` | Сравнение радар vs буй по batch-результатам; режимы `scatter/spectra/polar/spreading/autocorr`; восстановление физ. единиц из `swh`; Kuik 1988, SOI. Вход: `buoy/params.csv` + `buoy/spec/`, выход: `buoy/figs/` |
 
-### Устаревшие файлы
-`src/algorithms/portrait.py`, `src/algorithms/direction.py` — не импортируются. Не трогать.
 
 ## Конфигурация
 
@@ -263,12 +322,14 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
   N_SHOTS=256  MEAN=4
 
 [input] / [output] / [pipeline]  ← сетевые настройки, файлы, очередь
+  [output] protocol = new | old   ← формат UDP-пакета (new=1412 байт v2.0, old=1398 байт)
 ```
 
-**Захардкожены в `load_config()`, не в config.ini** (версия алгоритма/протокола):
+**Захардкожены в `src/config.py:Constants`, не в config.ini** (версия алгоритма/протокола):
 ```
 N_FREQ=64  N_DIRS=36  K_NUM=32  NUM_AREA=8  N_FREQ_2D=36  ALGO_VERSION=1
 ```
+`ALGO_VERSION` меняется только в `src/config.py` (поле `Constants.ALGO_VERSION`).
 
 Флаги качества (**захардкожены в коде**, одинаковы в `processor.py` и `batch_process.py`):
 
@@ -333,13 +394,10 @@ PNG `debug_combined.png`: [0,0] 1D спектр; [0,1] полярный спек
 
 ## Что НЕ нужно делать
 
-- **Не применять** `apply_doppler_2d` и скалярный `apply_doppler_3d` — устарели.
 - **Не прибавлять SOG к `(Ux, Uy)` перед Doppler-коррекцией** — они уже включают скорость судна.
 - **При multiwave**: `calc_current_multiwave` принимает `spec_3d_ship`, возвращает остаточный `(Ucx, Ucy)`; `Ux = Ucx + Ux_ship`.
-- **Не использовать** удалённые поля Wave: `per`, `len`, `dir`, `ddir`, `vco`, `inv`.
 - **При изменении `_SIGNAL_BAND`** — перекалибровать SNR_A/B синхронно в `processor.py` и `batch_process.py`.
 - **Не трогать** `udp_protocol.docx` вручную — он генерируется скриптом.
-- **Не реанимировать** `portrait.py`, `direction.py`.
 - **Averager.get_mean()** возвращает 2-tuple `(Output, port)`, не 4-tuple.
 - **calc_partitions** возвращает на систему только `{h_s, t_p, d_p}` — без `t_m`, `d_m`.
 
@@ -347,3 +405,33 @@ PNG `debug_combined.png`: [0,0] 1D спектр; [0,1] полярный спек
 
 Допплер-коррекция: Carrasco, Lund, Nieto-Borge, Young. Принцип: `Δω = kx·Ux + ky·Uy`.
 Мультиволновой ток: Dankert & Rosenthal 2004; Stewart & Joy 1974. Fallback при коллинеарных системах.
+
+## Презентационные фигуры (`make_pres_figs.py`)
+
+Скрипт генерирует 4 типа PNG в `pres_figs/`: `omk_*`, `freq_*`, `dir_*`, `combined_*`.
+
+### Стиль (согласованные требования)
+
+| Параметр | Значение |
+|---|---|
+| Тема по умолчанию | `--style light` (светлый фон `#f6f8fa`, тёмный текст) |
+| Все подписи | **На русском языке** (оси, легенды, аннотации) |
+| Заголовки фигур | **Нет** — ни на отдельных, ни на панелях combined |
+| Тики | `direction='in'` на всех осях, включая twinx/twiny |
+| ω-k imshow | `interpolation='none'`; grid отключён (`ax.grid(False)`) |
+| ω-k colormap | `cmap_om='plasma'` — одинаковый и для портрета, и для полярного спектра |
+| Полоса сигнала | `signal_alpha=0.12` (светлее, не перекрывает портрет) |
+| Центроиды ячеек | `s=40`, `edgecolors='white'`, `linewidths=0.5`, явная метка в легенде |
+| Легенда | `framealpha=0.82` — непрозрачный фон |
+| Аннотации периодов | `zorder=12`, `alpha=0.95` — на переднем плане |
+| Шаг тиков частоты | `MultipleLocator(0.03)` Гц на оси X спектра |
+| figsize (отдельные) | omk=(8, 6.2), freq=(8.5, 5.2), dir=(6.5, 6.5) |
+| figsize (combined) | (14, 5.0), `wspace=0.22` — компактный трёхпанельный слайд |
+| Цвета систем | `_SYS_COLORS = ['#FF9F1C', '#2EC4B6', '#E71D36']` (янтарный/бирюзовый/малиновый) |
+| DPI | 150 по умолчанию |
+
+### Структура панелей
+
+- **ω-k портрет** (`_draw_omk`): LogNorm + plasma, полоса сигнала, дисперсионная кривая ω=√(gk), допплер-сдвинутые кривые на систему, scatter-центроиды
+- **1D спектр** (`_draw_freq`): кривая S(f), подсветка полос систем, аннотации периодов со стрелками, вторичная ось периодов сверху
+- **Направленный** (`_draw_dir`): полярный, Север вверх по часовой (`theta_zero='N'`, `theta_direction=-1`), линии систем + ветер

@@ -2,16 +2,26 @@ import numpy as np
 
 
 class Area:
-    """
-    segment for processing
+    """Square spatial segment extracted from a polar radar image via bilinear interpolation.
+
+    The radar image is stored in polar coordinates (azimuth × range).  Area
+    maps a Cartesian square of side `size` pixels, centred at (`dist`, `azim`)
+    in polar space, back to (azimuth, range) indices with sub-pixel fractional
+    weights for bilinear interpolation.
+
+    calc_mask() is called once at startup; the returned index arrays are reused
+    every frame by Processor.update() to extract segment patches without
+    recomputing the geometry.
     """
 
     def __init__(self, size, dist, azim, orient, aap):
         """
-        :param size: length of segment edge [px]
-        :param dist: distance from common center to segment center [px]
-        :param azim: azimuth of segment center [rad]
-        :param orient: angle between common north and parallel for left/right edge [rad]
+        size   — side length of the square segment [px].
+        dist   — distance from antenna to segment centre [px] (= ADP).
+        azim   — azimuth of segment centre [rad].
+        orient — rotation of the square relative to the radial direction [rad];
+                 0 means sides are parallel/perpendicular to the radial axis.
+        aap    — total number of azimuth lines in the radar image (= AAP).
         """
         self.size = size
         self.dist = dist
@@ -20,8 +30,9 @@ class Area:
         self.aap = aap
 
     def get_vertex(self):
-        """
-        :return: vertex coordinates
+        """Return the four corner coordinates of the segment square in Cartesian space.
+
+        Corners are ordered: [right-upper, left-upper, left-lower, right-lower].
         """
         center = np.array([
             self.dist * np.cos(self.azim),
@@ -43,8 +54,16 @@ class Area:
         ])
 
     def calc_mask(self):
-        """
-        :return: coefficients for bilinear interpolation
+        """Precompute bilinear interpolation indices and weights for this segment.
+
+        Returns (mask_div, mask_mod) where:
+          mask_div — integer (range, azimuth) indices into the polar image,
+                     shape (2, size, size), int32.
+          mask_mod — fractional part of each coordinate, shape (2, size, size),
+                     float64.  Used by Processor.update() as:
+                       (x, y), (wx, wy) = mask_div, mask_mod
+                       row = bck[y, x]*(1-wx) + bck[y, x+1]*wx
+                       val = row*(1-wy) + next_row*wy
         """
         vertex = self.get_vertex()
         mask_div = np.zeros((2, self.size, self.size), dtype=np.int32)

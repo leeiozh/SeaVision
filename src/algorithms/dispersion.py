@@ -10,63 +10,6 @@ _MULTI_K_MIN_REL    = 0.08   # min k / k_max for a cell to be used in regression
                               # contributes only noise to the regression
 
 
-def calc_vco(port, om_max, k_max):
-    """
-    Estimate radial Doppler velocity projection via weighted least-squares fit
-    of the dispersion relation ω = √(gk) + k·vco (Senet et al. 2001,
-    Young et al. 1985, Carrasco et al. 2012).
-
-    For each wavenumber bin k_i (within the valid k range), the energy-weighted
-    centroid of ω is computed within a ±band window around the theoretical
-    dispersion curve.  Then vco is solved via:
-
-        vco = Σ_k [w_k · k · (ω̄(k) − √(gk))] / Σ_k [w_k · k²]
-
-    where w_k = Σ_ω P(ω, k_i) is the integrated power at that wavenumber.
-
-    port: (n_om, k_num), positive-frequency ω-k portrait.
-    Returns vco [m/s].
-    """
-    n_om, k_num = port.shape
-    om_arr = np.linspace(0, om_max, n_om)
-    k_arr = np.linspace(0, k_max, k_num)
-
-    k_lo = max(1, round(0.08 * k_num))
-    k_hi = round(0.65 * k_num)
-    om_lo = max(1, round(0.04 * n_om))
-    band = max(7, round(0.12 * n_om))   # ±band bins around ω=√(gk)
-
-    weights = np.zeros(k_num)
-    om_centroid = np.zeros(k_num)
-
-    for ki in range(k_lo, k_hi):
-        k = k_arr[ki]
-        om_ref = np.sqrt(9.81 * k)
-        ref_idx = int(round(om_ref / om_max * (n_om - 1)))
-        lo = max(om_lo, ref_idx - band)
-        hi = min(n_om, ref_idx + band + 1)
-        if hi <= lo:
-            continue
-        sl = port[lo:hi, ki].astype(float)
-        w = sl.sum()
-        if w <= 0:
-            continue
-        weights[ki] = w
-        om_centroid[ki] = float(np.dot(sl, om_arr[lo:hi])) / w
-
-    valid = (weights > 0) & (k_arr > 0)
-    if not np.any(valid):
-        return 0.0
-
-    k_v = k_arr[valid]
-    w_v = weights[valid]
-    residual = om_centroid[valid] - np.sqrt(9.81 * k_v)
-
-    num = float(np.dot(w_v * k_v, residual))
-    den = float(np.dot(w_v, k_v ** 2))
-    return float(num / den) if den > 0 else 0.0
-
-
 def calc_current_vector(spec_3d, k_max, om_max, band, sog=0.0, cog_deg=0.0, max_current=2.55):
     """
     Two-pass estimation of (Ux, Uy) [m/s] from the 3-D spectrum.
@@ -346,10 +289,3 @@ def calc_current_multiwave(spec_3d_ship, k_max, om_max, systems_draft, band):
     Ucx, Ucy = _clip(Ucx, Ucy)
 
     return Ucx, Ucy, sys_scatter
-
-
-def dispersion_curve(k, vco, depth=None):
-    """ω = √(gk·tanh(kd)) + k·vco  (deep water: depth=None)."""
-    if depth is None:
-        return np.sqrt(9.81 * k) + k * vco
-    return np.sqrt(9.81 * k * np.tanh(k * depth)) + k * vco

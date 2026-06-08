@@ -3,6 +3,7 @@ import sys
 
 
 def setup_logger(name="app", level=logging.INFO):
+    """Return a named logger with a stdout handler (idempotent — safe to call repeatedly)."""
     logger = logging.getLogger(name)
     logger.setLevel(level)
 

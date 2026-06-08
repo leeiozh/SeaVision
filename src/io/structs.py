@@ -4,6 +4,8 @@ from struct import calcsize, unpack, error
 
 
 class ProtocolError(ValueError):
+    """Raised when a raw UDP packet cannot be parsed or fails validation."""
+
     def __init__(self, message: str, data: Optional[bytes] = None):
         super().__init__(message)
         self.data = data
@@ -16,11 +18,22 @@ class ProtocolError(ValueError):
 
 
 class BackData:
+    """One complete antenna rotation of backscatter data.
+
+    step       — range resolution [m/px], typically 1.875 m.
+    pulse      — pulse length code: 1=SP, 2=MP, 3=LP.
+    bck        — backscatter intensity in polar coordinates, shape (AAP, ARDP), dtype uint8.
+    n_received — UDP only: number of azimuth lines actually received (< AAP means packet loss).
+                 -1 when not tracked (NC / BT8 sources).
+
+    EOF sentinel: step == 0.0 signals end-of-file from NCInputSource / BT8InputSource.
+    """
+
     def __init__(self, step: float, pulse: int, bck: np.ndarray, n_received: int = -1):
-        self.step = step        # range resolution
-        self.pulse = pulse      # bite of pulse length
-        self.bck = bck          # backscatter in polar coordinates (AAP, AREA_READ_DIST_PX)
-        self.n_received = n_received  # UDP: lines actually received; -1 = not tracked (NC/BT8)
+        self.step = step
+        self.pulse = pulse
+        self.bck = bck
+        self.n_received = n_received
 
 
 # Struct format:
@@ -40,6 +53,12 @@ _BCK_PAYLOAD_SIZE = 1024
 
 
 class BackPack:
+    """Parsed payload of one 1032-byte backscatter UDP packet.
+
+    Each azimuth line is split into two packets (part_index 0 and 1), each
+    carrying 512 uint8 range samples (half of the full ARDP extent).
+    """
+
     def __init__(self, num_line: int, step: float, part_index: int, part_value: int, pulse: int, payload: bytes):
         self.num_line = num_line
         self.step = step
@@ -50,6 +69,10 @@ class BackPack:
 
 
 def parse_back_packet(pack: bytes) -> BackPack:
+    """Parse a 1032-byte backscatter UDP packet into a BackPack.
+
+    Raises ProtocolError if the size, type byte, or part index is invalid.
+    """
     if len(pack) != _BCK_PKT_SIZE:
         raise ProtocolError(f"Backscatter packet wrong size: expected {_BCK_PKT_SIZE}, got {len(pack)}", pack)
 
@@ -80,13 +103,26 @@ def parse_back_packet(pack: bytes) -> BackPack:
 
 
 class Navi:
+    """Navigation snapshot associated with one radar frame.
+
+    hdg — gyro heading [°], 0–360.
+    cog — course over ground [°], 0–360.
+    spd — lag speed (water-relative) [m/s].
+    sog — speed over ground [m/s].
+    lat — latitude [°], −90 to +90.
+    lon — longitude [°], −180 to +180.
+
+    All angular fields use compass convention (0 = North, clockwise).
+    sog and spd are in m/s — do not convert.
+    """
+
     def __init__(self, hdg: float, cog: float, spd: float, sog: float, lat: float, lon: float):
-        self.hdg = hdg  # ship heading
-        self.cog = cog  # ship course over ground
-        self.spd = spd  # ship lag speed
-        self.sog = sog  # ship speed over ground
-        self.lat = lat  # latitude
-        self.lon = lon  # longitude
+        self.hdg = hdg
+        self.cog = cog
+        self.spd = spd
+        self.sog = sog
+        self.lat = lat
+        self.lon = lon
 
 
 # Struct format:
@@ -156,6 +192,7 @@ class Wave:
         self.d_m = d_m
 
     def sum(self, other, size):
+        """Accumulate other/size into self — one step of a running mean over `size` frames."""
         t_p = other.t_p if np.isfinite(other.t_p) else 0.0
         t_m = other.t_m if np.isfinite(other.t_m) else 0.0
         return Wave(
@@ -168,11 +205,35 @@ class Wave:
         )
 
     def print(self):
+        """Semicolon-separated string for the _params.csv row (CSVOutputSink)."""
         return (f"{self.swh:.2f};{self.t_p:.2f};"
                 f"{self.d_p:.0f};{self.d_m:.0f};{self.t_m:.2f};")
 
 
 class Output:
+    """Averaged processing result ready for UDP/CSV transmission.
+
+    Produced by Averager.get_mean() from the last MEAN WaveOutput frames.
+    Spectral arrays are normalised to [0, 255].
+
+    Key fields consumed by output sinks:
+      pulse      — pulse length code (1/2/3 = SP/MP/LP).
+      step       — range resolution [m/px].
+      rps        — antenna rotation rate [rpm].
+      ide_sys    — number of identified wave systems (0–3).
+      n_dis      — quality flag: 1 = GOOD, 0 = BAD.
+      wave_sum   — total sea state (swh, t_p, t_m, d_p, d_m).
+      wave_win   — wind-sea component.
+      wave_sw1/2 — swell components (sw1 shorter-period, sw2 longer-period).
+      spec_1d    — 1-D frequency spectrum, shape (N_FREQ,), int [0–255].
+      spec_2d    — directional spectrum, shape (N_DIRS, N_FREQ_2D), int [0–255],
+                   row i = math direction i×10°, column j = frequency bin j.
+      curr_speed — true ocean current speed [m/s], set after Averager by Processor.
+      curr_dir   — true ocean current direction [°], compass convention.
+      wspd       — wind speed estimate [m/s].
+      wind_dir   — wind direction [°], math convention.
+    """
+
     def __init__(self, pulse: int, step: float, rps: float, n_in_win: float, n_wins: float, step_area: float,
                  n_area: float, n_start: float, cog_proc: float, sog_proc: float, max_sys: int, ide_sys: int,
                  wave_sum: Wave, wave_win: Wave, wave_sw1: Wave, wave_sw2: Wave, n_dis: int, spec_1d: np.ndarray,
@@ -199,6 +260,12 @@ class Output:
 
 
 class WaveOutput:
+    """Single-computation result stored in the Averager ring buffer.
+
+    Holds wave parameters and un-normalised spectra for one processor cycle.
+    Averager.get_mean() accumulates MEAN of these into a final Output object.
+    """
+
     def __init__(self, ide_sys, wave_sum, wave_win, wave_sw1, wave_sw2, spec_1d, spec_2d):
         self.ide_sys = ide_sys
         self.wave_sum = wave_sum
@@ -207,28 +274,6 @@ class WaveOutput:
         self.wave_sw2 = wave_sw2
         self.spec_1d = spec_1d
         self.spec_2d = spec_2d
-
-
-class CurrentOutput:
-    """2-D current velocity vector in geographic coordinates [m/s]."""
-    def __init__(self, u_x: float = 0.0, u_y: float = 0.0):
-        self.u_x = u_x
-        self.u_y = u_y
-
-    @property
-    def speed(self):
-        return float(np.hypot(self.u_x, self.u_y))
-
-    @property
-    def direction(self):
-        return float(np.degrees(np.arctan2(self.u_y, self.u_x)) % 360)
-
-
-class WindOutput:
-    """Wind direction and backscatter intensity proxy."""
-    def __init__(self, direction: float = 0.0, sig: float = 0.0):
-        self.direction = direction
-        self.sig = sig
 
 
 class ProcessResult:

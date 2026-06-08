@@ -769,7 +769,7 @@ def _load_frames(name, nc_path, pulse, cfg, log):
     om_max = np.pi / (60.0 / cst.RPM)
 
     buoy_proc = None
-    if '0606' in name:
+    if '0606' in name or '0105' in name:
         raw_buoy = _load_buoy_data(nc_path)
         if raw_buoy is not None:
             buoy_proc = _compute_buoy_spectra(raw_buoy, cst.N_FREQ, om_max)
