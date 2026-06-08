@@ -46,8 +46,11 @@ python buoy/analyze.py [--csv buoy/params.csv] [--spec buoy/spec] [--out buoy/fi
 # Направленный разброс по Kuik 1988; индекс перекрытия спектров SOI ∈ [0,1]
 
 # Сборка Windows .exe через GitHub Actions
-# → push в origin/main или ручной запуск workflow "Build Windows EXE"
-# → скачать артефакт seavision-windows-x64 → положить config.ini рядом с seavision.exe
+# → push тега v* или ручной запуск workflow "Build Windows EXE"
+# → собираются ДВЕ версии:
+#     seavision-windows-x64        — штатная, БЕЗ matplotlib (pics=false)
+#     seavision-windows-x64-debug  — С matplotlib (для pics=<путь>, debug-картинки)
+# → скачать нужный артефакт → положить config.ini рядом с seavision.exe
 
 ```
 
@@ -294,10 +297,12 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 | `test/tester_receive.py` | Визуализация UDP v2.0 (1412 байт): 1D спектр + полярный спектр + таблица |
 | `test/tester_receive_old.py` | Визуализация **старого** протокола (1398 байт, `sv_protocol_2204.docx`) |
 | `test/tester_transmit.py` | Генератор тестового потока |
-| `seavision-win.spec` | PyInstaller onedir для Windows (без matplotlib, без UPX) |
+| `seavision-win.spec` | PyInstaller onedir для Windows (**без** matplotlib, без UPX) → `dist/seavision/` |
+| `seavision-win-debug.spec` | То же, но **С** matplotlib (Agg-backend) для `pics=<путь>` → `dist-debug/seavision/` |
 | `seavision.spec` | PyInstaller spec для локальной сборки (Linux/общий) |
-| `requirements-win.txt` | numpy, scipy, netCDF4, cftime — минимум для Windows-бандла |
-| `.github/workflows/build-windows.yml` | GHA: Windows x64 → артефакт `seavision-windows-x64` |
+| `requirements-win.txt` | numpy, scipy, netCDF4, cftime — минимум для штатного Windows-бандла |
+| `requirements-win-debug.txt` | то же + matplotlib (для debug-сборки) |
+| `.github/workflows/build-windows.yml` | GHA: Windows x64 → артефакты `seavision-windows-x64` (штатная) и `seavision-windows-x64-debug` (с matplotlib) |
 | `udp_protocol.docx` | **Авторитетный** протокол v2.0 (новый) |
 | `sv_protocol_2204.docx` | Старый протокол (1398 байт), режим `protocol = old` |
 | `batch_process.py` | Пакетная обработка; `_SIGNAL_BAND=10`, `_MAX_CURRENT=3.0`; разделение на I/O (`_load_frames` → dict с `cbck`/navi/`buoy_proc`) и вычисление (`_compute_from_frames`); `params.csv` содержит поля из `_PARAMS_FIELDS` (включая `swh`, `t_p`, `d_p`, `curr_*`, `wspd_proc`, `u_x/u_y`, `swh_buoy` и др.); `wt_m` всегда 0.0, т.к. `calc_partitions` не возвращает `t_m` для систем; буй: окно `_BUOY_SKIP_SEC=420` (7 мин) — `_BUOY_END_SEC=2220` (37 мин) |

@@ -23,15 +23,25 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-win.txt
+          pip install -r requirements-win-debug.txt
           pip install pyinstaller
 
-      - name: Build EXE
-        run: pyinstaller seavision-win.spec
+      - name: Build EXE (no matplotlib)
+        run: pyinstaller seavision-win.spec --distpath dist --workpath build
+
+      - name: Build EXE (debug, with matplotlib)
+        run: pyinstaller seavision-win-debug.spec --distpath dist-debug --workpath build-debug
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: seavision-windows-x64
-          path: dist/seavision/       # вся папка onedir: exe + dll-файлы
+          path: dist/seavision/             # штатная сборка: exe + dll, без matplotlib
+          retention-days: 30
+
+      - name: Upload artifact (debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: seavision-windows-x64-debug
+          path: dist-debug/seavision/       # debug-сборка с matplotlib (pics=<путь>)
           retention-days: 30
