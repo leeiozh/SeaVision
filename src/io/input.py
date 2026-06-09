@@ -179,8 +179,9 @@ class UdpInputSource(InputSource):
                 f'Frame incomplete: {n_recv}/{n} lines ({pct:.0f}%) — packet loss.')
         # Return a copy: the next get_bck() call immediately overwrites self.curr_bck.bck
         # with new frame data while the previous frame may still be in the processing queue.
+        # recv_time stamps rotation completion → drives live RPM estimation in the processor.
         return BackData(self.curr_bck.step, self.curr_bck.pulse,
-                        self.curr_bck.bck.copy(), n_recv)
+                        self.curr_bck.bck.copy(), n_recv, recv_time=time())
 
     def close(self):
         self.back_socket.close()

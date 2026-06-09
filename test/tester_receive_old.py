@@ -5,8 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
-MY_IP   = '192.168.192.185'
-# MY_IP = '127.0.0.1'
+# MY_IP   = '192.168.192.185'
+MY_IP = '127.0.0.1'
 IN_PORT = 4000
 
 N_FREQS   = 64    # spec_1d frequency bins
@@ -15,40 +15,37 @@ N_FREQ_2D = 36    # spec_2d frequency bins
 F_DISPLAY = 0.20  # Hz — desired radial cap (clamped to Nyquist f_max if lower)
 _DEFAULT_RPM = 25.0   # initial guess until the first packet sets the real rate
 
-# ── Packet format v2.0 ─────────────────────────────────────────────────────────
-# Header 52 B | spec_1d 64 B | spec_2d 36×36 = 1296 B → 1412 bytes total
+# ── Packet format (legacy, sv_protocol_2204.docx) ───────────────────────────────
+# Header 102 B | spec_1d 64 B | spec_2d 36×36 = 1296 B → 1398 bytes total
 #
-# [0]  B  type=5
-# [1]  B  pulse
-# [2]  H  step_mm
-# [3]  H  rpm_x100      (hundredths of rpm — may be a live-estimated value)
-# [4]  H  swh_sum ×100
-# [5]  H  t_p_sum ×100
-# [6]  H  t_m_sum ×100
-# [7]  H  dir_p_sum  (integer degrees)
-# [8]  H  dir_m_sum  (integer degrees)
-# [9]  H  swh_win ×100
-# [10] H  t_p_win ×100
-# [11] H  dir_p_win
-# [12] H  swh_sw1 ×100
-# [13] H  t_p_sw1 ×100
-# [14] H  dir_p_sw1
-# [15] H  swh_sw2 ×100
-# [16] H  t_p_sw2 ×100
-# [17] H  dir_p_sw2
-# [18] H  curr_speed ×100  (uint16, max 655 m/s)
-# [19] H  curr_dir
-# [20] H  wspd ×10
-# [21] H  wind_dir
-# [22] B  n_sys
-# [23] B  quality  (0=BAD, 1=GOOD)
-# [24] H  algo_version  (1 = текущая версия алгоритма)
-# [25-27] H×3  reserved
-_HDR_FMT  = "<BBHHHHHHHHHHHHHHHHHHHHBBHHHH"
-_HDR_SIZE = struct.calcsize(_HDR_FMT)                     # 52 bytes
-_PKT_SIZE = _HDR_SIZE + N_FREQS + N_FREQ_2D * N_DIRS      # 52+64+1296 = 1412 bytes
-
-_PULSE = {1: "SP", 2: "MP", 3: "LP"}
+# [0]   B  type = 5
+# [1]   H  swh_sum  ×100  (hundredths of m)
+# [2]   H  t_p_sum  ×100  (hundredths of s)
+# [3]   H  dir_p_sum      (integer degrees)
+# [4]   H  swh_win  ×100
+# [5]   H  t_p_win  ×100
+# [6]   H  dir_p_win
+# [7]   H  swh_sw1  ×100
+# [8]   H  t_p_sw1  ×100
+# [9]   H  dir_p_sw1
+# [10]  H  swh_sw2  ×100
+# [11]  H  t_p_sw2  ×100
+# [12]  H  dir_p_sw2
+# [13]  H  wind speed  ×100  (hundredths of m/s)
+# [14]  H  wind dir
+# [15]  H  current speed ×1000  (thousandths of m/s)
+# [16]  H  current dir
+# [17]  H  rpm ×1000  (thousandths of rpm)
+# [18]  B  N_FREQ count
+# then  N_FREQ bytes spec_1d
+# then  B N_FREQ_2D count, B N_DIRS count
+# then  N_FREQ_2D×N_DIRS bytes spec_2d
+_HDR_FMT  = "<B17H"
+_HDR_SIZE = struct.calcsize(_HDR_FMT)                          # 35 bytes
+# full header up to (and including) the spec_1d count byte
+_HDR1D_OFF = _HDR_SIZE + 1                                     # 36 bytes
+_SPEC2D_HDR = 2                                                # two count bytes
+_PKT_SIZE = _HDR1D_OFF + N_FREQS + _SPEC2D_HDR + N_FREQ_2D * N_DIRS   # 1398 bytes
 
 _DIR_CFG = [
     ('dir_sum',  'tomato',      'Total'),
@@ -139,7 +136,7 @@ def _setup():
                     transform=ax3.transAxes, va='top', ha='left',
                     fontfamily='monospace', fontsize=9, linespacing=1.75)
 
-    fig.suptitle("Waiting for data…", fontsize=11)
+    fig.suptitle("Waiting for data… (legacy protocol)", fontsize=11)
     plt.tight_layout()
     plt.pause(0.05)
     return dict(fig=fig, ax1=ax1, line1d=line1d, fill1d=fill1d, ax2=ax2,
@@ -177,55 +174,49 @@ def _apply_rpm(H, rpm: float):
 
 
 def _decode(data: bytes):
-    n_hdr_1d = _HDR_SIZE + N_FREQS
-    if len(data) < n_hdr_1d:
+    if len(data) < _HDR1D_OFF + N_FREQS:
         return None
 
-    un = struct.unpack(_HDR_FMT + f"{N_FREQS}B", data[:n_hdr_1d])
+    un = struct.unpack(_HDR_FMT, data[:_HDR_SIZE])
     if un[0] != 5:
         print(f"Unexpected packet type: {un[0]}")
         return None
 
-    spec_1d = np.array(un[28:28 + N_FREQS], dtype=np.float32)
+    spec_1d = np.frombuffer(data[_HDR1D_OFF:_HDR1D_OFF + N_FREQS],
+                            dtype=np.uint8).astype(np.float32)
 
+    spec2d_off = _HDR1D_OFF + N_FREQS + _SPEC2D_HDR
     if len(data) >= _PKT_SIZE:
-        spec_2d = (np.frombuffer(data[n_hdr_1d:_PKT_SIZE], dtype=np.uint8)
+        spec_2d = (np.frombuffer(data[spec2d_off:_PKT_SIZE], dtype=np.uint8)
                    .reshape(N_DIRS, N_FREQ_2D).astype(np.float32))
     else:
         spec_2d = np.zeros((N_DIRS, N_FREQ_2D), dtype=np.float32)
 
     return {
-        'pulse':    un[1],
-        'step':     un[2] / 1000.0,
-        'rpm':      un[3] / 100.0,
-        # summary (swh, t_p, t_m, dir_p, dir_m)
-        'swh_sum':  un[4]  / 100.0,
-        'per_sum':  un[5]  / 100.0,
-        'tm_sum':   un[6]  / 100.0,
-        'dir_sum':  un[7],
-        'dirm_sum': un[8],
+        # summary (swh, t_p, dir_p)
+        'swh_sum':  un[1]  / 100.0,
+        'per_sum':  un[2]  / 100.0,
+        'dir_sum':  un[3],
         # wind wave (swh, t_p, dir_p)
-        'swh_win':  un[9]  / 100.0,
-        'per_win':  un[10] / 100.0,
-        'dir_win':  un[11],
+        'swh_win':  un[4]  / 100.0,
+        'per_win':  un[5]  / 100.0,
+        'dir_win':  un[6],
         # swell 1 (swh, t_p, dir_p)
-        'swh_sw1':  un[12] / 100.0,
-        'per_sw1':  un[13] / 100.0,
-        'dir_sw1':  un[14],
+        'swh_sw1':  un[7]  / 100.0,
+        'per_sw1':  un[8]  / 100.0,
+        'dir_sw1':  un[9],
         # swell 2 (swh, t_p, dir_p)
-        'swh_sw2':  un[15] / 100.0,
-        'per_sw2':  un[16] / 100.0,
-        'dir_sw2':  un[17],
-        # current
-        'curr_spd': un[18] / 100.0,
-        'curr_dir': un[19],
-        # wind environment
-        'wspd':     un[20] / 10.0,
-        'wind_dir': un[21],
-        # misc
-        'ide_sys':      un[22],
-        'quality':      un[23],
-        'algo_version': un[24],
+        'swh_sw2':  un[10] / 100.0,
+        'per_sw2':  un[11] / 100.0,
+        'dir_sw2':  un[12],
+        # wind environment (speed ×100 → m/s, dir)
+        'wspd':     un[13] / 100.0,
+        'wind_dir': un[14],
+        # current (speed ×1000 → m/s, dir)
+        'curr_spd': un[15] / 1000.0,
+        'curr_dir': un[16],
+        # antenna rate (×1000 → rpm)
+        'rpm':      un[17] / 1000.0,
         # spectra
         'spec_1d':  spec_1d,
         'spec_2d':  spec_2d,
@@ -252,16 +243,15 @@ def _update(H, d: dict):
 
     SEP = '─' * 48
 
-    def wrow(name, swh, dr, per, tm=None):
+    def wrow(name, swh, dr, per):
         if per < 0.1:
             return f"  {name:<11}  —"
-        tm_str = f"  Tm={tm:.1f}s" if tm is not None and tm > 0.1 else ""
-        return f"  {name:<11} {swh:5.2f}m  {dr:5.0f}°  Tp={per:.1f}s{tm_str}"
+        return f"  {name:<11} {swh:5.2f}m  {dr:5.0f}°  Tp={per:.1f}s"
 
     txt = (
         f"  {'':11} {'SWH':>5}   {'Dir':>5}   {'T':>5}\n"
         f"  {SEP}\n"
-        f"{wrow('Summary',  d['swh_sum'], d['dir_sum'], d['per_sum'], d['tm_sum'])}\n"
+        f"{wrow('Summary',  d['swh_sum'], d['dir_sum'], d['per_sum'])}\n"
         f"{wrow('Wind wave',d['swh_win'], d['dir_win'], d['per_win'])}\n"
         f"{wrow('Swell 1',  d['swh_sw1'], d['dir_sw1'], d['per_sw1'])}\n"
         f"{wrow('Swell 2',  d['swh_sw2'], d['dir_sw2'], d['per_sw2'])}\n"
@@ -269,18 +259,14 @@ def _update(H, d: dict):
         f"  {'Current:':<13} {d['curr_spd']:5.2f} m/s  →  {d['curr_dir']:4}°\n"
         f"  {'Wind:':<13}     {d['wspd']:5.2f} m/s  →  {d['wind_dir']:4}°\n"
         f"  {SEP}\n"
-        f"  step: {d['step']:.3f} m   [{_PULSE.get(d['pulse'], '?')}]"
-        f"   RPM: {d['rpm']:.2f}   N_sys: {d['ide_sys']}\n"
-        f"  quality: {'GOOD ✓' if d['quality'] else 'BAD  ✗'}"
+        f"  RPM: {d['rpm']:.2f}   [legacy protocol]"
     )
     H['info'].set_text(txt)
 
     H['fig'].suptitle(
         f"Hs={d['swh_sum']:.2f}m   Dir={d['dir_sum']}°   Tp={d['per_sum']:.1f}s"
-        f"   Tm={d['tm_sum']:.1f}s"
         f"   Curr={d['curr_spd']:.2f}m/s→{d['curr_dir']}°"
-        f"   Wind={d['wspd']:.1f}m/s→{d['wind_dir']}°"
-        f"   RPM={d['rpm']:.2f}   N_sys={d['ide_sys']}   [{_PULSE.get(d['pulse'], '?')}]",
+        f"   Wind={d['wspd']:.1f}m/s→{d['wind_dir']}°   RPM={d['rpm']:.2f}  [legacy]",
         fontsize=10,
     )
 
@@ -303,8 +289,7 @@ if __name__ == '__main__':
             continue
         _update(H, d)
         print(
-            f"Hs={d['swh_sum']:.2f}m  Tp={d['per_sum']:.1f}s  Tm={d['tm_sum']:.1f}s"
+            f"Hs={d['swh_sum']:.2f}m  Tp={d['per_sum']:.1f}s"
             f"  Dir={d['dir_sum']}°  Curr={d['curr_spd']:.2f}m/s"
-            f"  Wind={d['wspd']:.1f}m/s  Nsys={d['ide_sys']}"
-            f"  RPM={d['rpm']:.2f}  [{_PULSE.get(d['pulse'], '?')}]"
+            f"  Wind={d['wspd']:.1f}m/s  RPM={d['rpm']:.2f}  [legacy]"
         )

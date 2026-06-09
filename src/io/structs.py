@@ -25,15 +25,20 @@ class BackData:
     bck        — backscatter intensity in polar coordinates, shape (AAP, ARDP), dtype uint8.
     n_received — UDP only: number of azimuth lines actually received (< AAP means packet loss).
                  -1 when not tracked (NC / BT8 sources).
+    recv_time  — wall-clock time [s] when the rotation finished (time.time()).
+                 Set only by the live UDP source; 0.0 for file sources. Used by
+                 the processor to estimate RPM from inter-frame intervals.
 
     EOF sentinel: step == 0.0 signals end-of-file from NCInputSource / BT8InputSource.
     """
 
-    def __init__(self, step: float, pulse: int, bck: np.ndarray, n_received: int = -1):
+    def __init__(self, step: float, pulse: int, bck: np.ndarray, n_received: int = -1,
+                 recv_time: float = 0.0):
         self.step = step
         self.pulse = pulse
         self.bck = bck
         self.n_received = n_received
+        self.recv_time = recv_time
 
 
 # Struct format:

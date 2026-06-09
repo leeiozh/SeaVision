@@ -1,5 +1,6 @@
 from configparser import ConfigParser
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -9,7 +10,9 @@ class Constants:
     ARDP: int
     ADP: int
     ASP: int
-    RPM: int
+    # RPM: fixed antenna rate from config (fractional ok), or None when RPM=false/auto
+    # — then the processor estimates it live from inter-frame timing (median over N_SHOTS).
+    RPM: Optional[float]
     installation_id: str
 
     # ── Empirical calibration (from [calibration]) ────────────────────────────
@@ -52,13 +55,17 @@ def load_config(path: str) -> AppConfig:
     cfg = ConfigParser(allow_no_value=True, inline_comment_prefixes=(";", "#"))
     cfg.read(path)
 
+    # RPM may be a number (fixed, fractional ok) or false/auto/none (→ None: estimate live).
+    _rpm_raw = (cfg.get("hardware", "RPM", fallback="25") or "").strip().lower()
+    rpm_val = None if _rpm_raw in ("false", "auto", "none", "") else float(_rpm_raw)
+
     const = Constants(
         # [hardware]
         AAP             = cfg.getint  ("hardware",    "AREA_AZIM_PX",       fallback=4096),
         ARDP            = cfg.getint  ("hardware",    "AREA_READ_DIST_PX",  fallback=2048),
         ADP             = cfg.getint  ("hardware",    "AREA_DISTANCE_PX",   fallback=1192),
         ASP             = cfg.getint  ("hardware",    "AREA_SIZE_PX",       fallback=192),
-        RPM             = cfg.getint  ("hardware",    "RPM",                fallback=25),
+        RPM             = rpm_val,
         installation_id = cfg.get     ("hardware",    "installation_id",    fallback="default"),
         # [calibration]
         SNR_A           = cfg.getfloat("calibration", "SNR_A",              fallback=33.0),

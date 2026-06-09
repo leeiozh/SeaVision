@@ -32,6 +32,33 @@ jobs:
       - name: Build EXE (debug, with matplotlib)
         run: pyinstaller seavision-win-debug.spec --distpath dist-debug --workpath build-debug
 
+      # Windows 7/8/8.1 не содержат API-set "Path" (api-ms-win-core-path-l1-1-0.dll),
+      # появившийся только в Windows 10. Python 3.9+ линкуется с ним при старте,
+      # поэтому на Win7 бандл падает с "отсутствует api-ms-win-core-path-l1-1-0.dll".
+      # Кладём рядом с exe open-source шим (PathCch* → легаси Shlwapi), это снимает
+      # зависимость и на Win10+ не мешает (системная DLL имеет приоритет загрузки).
+      - name: Add Windows 7 path-API shim
+        shell: pwsh
+        env:
+          SHIM_VERSION: '0.3.1'
+        run: |
+          $url = "https://github.com/nalexandru/api-ms-win-core-path-HACK/releases/download/$env:SHIM_VERSION/api-ms-win-core-path-blender-$env:SHIM_VERSION.zip"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile shim.zip
+          Expand-Archive -Path shim.zip -DestinationPath shim -Force
+          # внутри архива x64- и x86-варианты лежат в разных подпапках; берём 64-битный
+          $dll = Get-ChildItem -Path shim -Recurse -Filter 'api-ms-win-core-path-l1-1-0.dll' |
+                 Where-Object { $_.FullName -match '(?i)(x64|amd64|win64|\\64\\)' } |
+                 Select-Object -First 1
+          if (-not $dll) {
+            $all = Get-ChildItem -Path shim -Recurse -Filter 'api-ms-win-core-path-l1-1-0.dll'
+            Write-Error "x64 shim DLL not found. Archive contents: $($all.FullName -join ', ')"
+            exit 1
+          }
+          Write-Host "Using shim: $($dll.FullName)"
+          Copy-Item $dll.FullName 'dist/seavision/api-ms-win-core-path-l1-1-0.dll' -Force
+          Copy-Item $dll.FullName 'dist-debug/seavision/api-ms-win-core-path-l1-1-0.dll' -Force
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

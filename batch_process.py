@@ -766,7 +766,7 @@ def _load_frames(name, nc_path, pulse, cfg, log):
         except Exception:
             pass
     n_navi = max(n_navi, 1)
-    om_max = np.pi / (60.0 / cst.RPM)
+    om_max = np.pi * (cst.RPM or 25) / 60.0   # batch is offline: no live RPM, fall back to 25
 
     buoy_proc = None
     if '0606' in name or '0105' in name:
@@ -793,7 +793,7 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
     Returns (row_dict, spec_1d, spec_2d) or None on failure.
     """
     cst       = cfg.const
-    om_max    = np.pi / (60.0 / cst.RPM)
+    om_max    = np.pi * (cst.RPM or 25) / 60.0   # batch is offline: no live RPM, fall back to 25
     step      = 1.875
     k_max     = np.pi / cst.ASP / step * cst.K_NUM
     half      = cst.N_SHOTS // 2

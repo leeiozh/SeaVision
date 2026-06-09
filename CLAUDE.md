@@ -50,6 +50,8 @@ python buoy/analyze.py [--csv buoy/params.csv] [--spec buoy/spec] [--out buoy/fi
 # → собираются ДВЕ версии:
 #     seavision-windows-x64        — штатная, БЕЗ matplotlib (pics=false)
 #     seavision-windows-x64-debug  — С matplotlib (для pics=<путь>, debug-картинки)
+# → в оба артефакта кладётся шим api-ms-win-core-path-l1-1-0.dll (поддержка Win7/8;
+#   на Win10+ системная DLL имеет приоритет, шим не мешает) — НЕ удалять из папки
 # → скачать нужный артефакт → положить config.ini рядом с seavision.exe
 
 ```
@@ -317,6 +319,7 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 ```
 [hardware]        ← геометрия инсталляции, задаётся при монтаже
   installation_id  AREA_AZIM_PX  AREA_READ_DIST_PX  AREA_DISTANCE_PX  AREA_SIZE_PX  RPM
+  RPM = число → фиксированное; RPM = false → вычисляется вживую (см. ниже)
 
 [calibration]     ← подгоняется по месту после установки
   SNR_A  SNR_B    — SWH = 0.01·(SNR_A + SNR_B·√snr)
@@ -346,7 +349,19 @@ N_FREQ=64  N_DIRS=36  K_NUM=32  NUM_AREA=8  N_FREQ_2D=36  ALGO_VERSION=1
 
 `quality = 1` если все условия выполнены И `n_sys >= 1`.
 
-`om_max = π · RPM / 60 ≈ 1.309 rad/s`.
+`om_max = π · RPM / 60 ≈ 1.309 rad/s` (при RPM=25).
+
+### RPM: фиксированный или вычисляемый вживую
+
+`[hardware] RPM` может быть числом (фиксированное) или `false`/`auto` (→ `Constants.RPM = None`).
+
+- **`om_max` — мастер-величина.** `omega_vals = linspace(0, om_max, N_SHOTS//2)` и все вычисления частот, периодов (`T=2π/ω`), дисперсионных кривых (`ω=√(gk)`), допплер-сдвигов наследуют RPM **только** через `om_max`/`omega_vals`. Других зависимостей от RPM в расчётах нет.
+- **Динамическая оценка** (`processor._update_rpm`): один кадр = один оборот, поэтому интервал между кадрами = период оборота. Кольцевой буфер последних `N_SHOTS` интервалов → **медиана** (устойчива к потерям/пропущенным оборотам) → `rpm = 60/median`, пересчёт `self.om_max` на **каждом** кадре, перед спектральным блоком. К первому спектру (s.index ≥ N_SHOTS) оценка уже полная.
+- **Источник времени:** `BackData.recv_time` ставит **только** `UdpInputSource.get_bck()` (живой радар). Файловые источники (NC/BT8) оставляют `recv_time=0.0` → динамика выключена, берётся дефолт `_FALLBACK_RPM=25`. Защита от выбросов: интервал принимается только в полосе `_RPM_MIN_DT=0.3 … _RPM_MAX_DT=12.0` с.
+- **Точность сотых:** `self.rpm` — float; фиксированный RPM в конфиге парсится как `float` (можно дробный, напр. `RPM = 24.73`). Передаётся с сотыми: new `rpm_x100 = round(rps·100)`, old `rpm×1000`.
+- **Вывод:** `Output.rps` = текущий `self.rpm` (динамический или фиксированный) → уходит в UDP-пакет.
+- **Manager** (`rot_period=60/(RPM or 25)`) и **`batch_process`** (`om_max=π·(RPM or 25)/60`, оффлайн — динамика недоступна) при `RPM=None` подставляют 25.
+- **Receiver:** `tester_receive.py`/`tester_receive_old.py` берут `rpm` из пакета и **перестраивают** частотную ось/полярную сетку (`_freq_geometry`, `_apply_rpm`) при изменении RPM > 0.5%; `f_disp = min(0.20 Hz, f_max)`. RPM отображается с точностью `.2f`.
 
 ## Алгоритмические пороги
 

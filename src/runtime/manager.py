@@ -43,7 +43,8 @@ class Manager:
         self.proc_stop_ev = Event()
         self.proc_lock = Lock()
 
-        rot_period = 60.0 / config.const.RPM
+        # RPM may be None (estimated live) — use 25 only for these coarse timeouts.
+        rot_period = 60.0 / (config.const.RPM or 25)
         self._silence_threshold = config.const.N_SHOTS * rot_period
         self._watchdog_timeout = 10.0 * rot_period
 

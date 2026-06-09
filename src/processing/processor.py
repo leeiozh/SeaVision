@@ -21,6 +21,10 @@ _MAX_CURRENT     = 3.0    # physical clip for apparent current [m/s]
 _SNR_QUALITY_MIN = 5.0    # min snr_tot for quality=GOOD
 _T_PEAK_MIN      = 5.5    # min peak period [s] for quality=GOOD
 
+_FALLBACK_RPM    = 25.0   # default antenna rate until a live estimate is available
+_RPM_MIN_DT      = 0.3    # plausible rotation period band [s] (≈200 RPM upper)
+_RPM_MAX_DT      = 12.0   #                                    (≈5 RPM lower)
+
 from src.algorithms.partition import calc_wspd, calc_partitions, find_freq_peaks, find_system_dirs
 from src.io.structs import Wave, WaveOutput
 
@@ -40,7 +44,7 @@ def _save_debug_pic(
     swh=0.0, T_peak=0.0, T_mean=0.0, peak_dir=0.0,
     quality=0, snr_tot=0.0, wdir=0.0, wspd=0.0, wind_sig=0.0,
     pulse=0, n_sys=0,
-    raw_bck=None,
+    raw_bck=None, rpm=0.0,
     path='.',
 ):
     """Single diagnostic figure combining 1D spectrum, polar directional spectrum,
@@ -176,7 +180,8 @@ def _save_debug_pic(
         ax2.legend(fontsize=6, loc='upper right')
         ax2.text(0.02, 0.97,
                  f'Ux={Ux:+.2f} Uy={Uy:+.2f} m/s\ncurr={curr_speed:.2f}→{curr_dir:.0f}°\n'
-                 f'SOG={sog:.2f} COG={cog_deg:.0f}°',
+                 f'SOG={sog:.2f} COG={cog_deg:.0f}°\n'
+                 f'RPM={rpm:.2f}  fmax={float(omega_vals[-1])/(2*np.pi):.3f}Hz',
                  transform=ax2.transAxes, fontsize=6, va='top', color='white',
                  bbox=dict(facecolor='black', alpha=0.55, pad=2))
     ax2.set_xlabel('k [rad/m]', color='white'); ax2.set_ylabel('ω [rad/s]', color='white')
@@ -289,7 +294,18 @@ class Processor:
         self.pics = pics
         self.cfg  = config
         self.cst  = config.const
-        self.om_max = np.pi / (60 / self.cfg.const.RPM)
+
+        # ── antenna rate ──────────────────────────────────────────────────────
+        # Fixed from config, or estimated live from inter-frame timing when
+        # RPM=false (cst.RPM is None). om_max = π·RPM/60 is the master quantity:
+        # omega_vals and every frequency/period/dispersion calc derive from it.
+        self._dyn_rpm = self.cst.RPM is None
+        self.rpm = _FALLBACK_RPM if self.cst.RPM is None else float(self.cst.RPM)
+        self.om_max = np.pi * self.rpm / 60.0
+        # ring buffer of last N_SHOTS inter-frame intervals [s]
+        self._dt_buf = np.zeros(self.cst.N_SHOTS, dtype=np.float64)
+        self._dt_count = 0
+        self._t_prev = 0.0
 
         self.state = ProcessorState()
         self.state.init_arrays(
@@ -320,6 +336,33 @@ class Processor:
     def stop(self):
         return 0
 
+    def _update_rpm(self, recv_time: float):
+        """Estimate antenna RPM from inter-frame arrival times.
+
+        One frame == one rotation, so the interval between consecutive frames is
+        the rotation period.  We keep a ring buffer of the last N_SHOTS intervals
+        and take the median (robust to dropped rotations / packet loss), updating
+        self.rpm and self.om_max on every frame.
+
+        No-op unless RPM=false (self._dyn_rpm) and a valid recv_time is present
+        (live UDP only — file sources leave recv_time=0.0).
+        """
+        if not self._dyn_rpm or not recv_time:
+            return
+        if self._t_prev > 0.0:
+            dt = recv_time - self._t_prev
+            if _RPM_MIN_DT < dt < _RPM_MAX_DT:          # reject implausible gaps
+                self._dt_buf[self._dt_count % self.cst.N_SHOTS] = dt
+                self._dt_count += 1
+        self._t_prev = recv_time
+
+        n = min(self._dt_count, self.cst.N_SHOTS)
+        if n > 0:
+            med = float(np.median(self._dt_buf[:n]))
+            if med > 0.0:
+                self.rpm = 60.0 / med
+                self.om_max = np.pi * self.rpm / 60.0
+
     def update(self, back: "BackData", navi: "Navi") -> dict:
         """Process one radar frame and return a result dict.
 
@@ -336,6 +379,9 @@ class Processor:
         """
         s   = self.state
         cst = self.cst
+
+        # Refresh live RPM/om_max estimate before any frequency computation.
+        self._update_rpm(back.recv_time)
 
         s.curr_step  = back.step
         s.curr_pulse = back.pulse
@@ -517,13 +563,13 @@ class Processor:
                     swh=swh, T_peak=T_peak, T_mean=T_mean, peak_dir=peak_dir,
                     quality=quality, snr_tot=snr_tot, wdir=wdir,
                     wspd=wspd, wind_sig=ring_sig, pulse=s.curr_pulse, n_sys=sys["n_sys"],
-                    raw_bck=bck, path=_pics,
+                    raw_bck=bck, rpm=self.rpm, path=_pics,
                 )
 
             self.averager.push(wave_out, port_fixed)
 
             result, port_out = self.averager.get_mean(
-                pulse=s.curr_pulse, step=s.curr_step, rpm=cst.RPM,
+                pulse=s.curr_pulse, step=s.curr_step, rpm=self.rpm,
                 n_shots=cst.N_SHOTS, asp=cst.ASP, adp=cst.ADP,
             )
 
