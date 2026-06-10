@@ -47,11 +47,18 @@ python buoy/analyze.py [--csv buoy/params.csv] [--spec buoy/spec] [--out buoy/fi
 
 # Сборка Windows .exe через GitHub Actions
 # → push тега v* или ручной запуск workflow "Build Windows EXE"
-# → собираются ДВЕ версии:
-#     seavision-windows-x64        — штатная, БЕЗ matplotlib (pics=false)
-#     seavision-windows-x64-debug  — С matplotlib (для pics=<путь>, debug-картинки)
-# → в оба артефакта кладётся шим api-ms-win-core-path-l1-1-0.dll (поддержка Win7/8;
-#   на Win10+ системная DLL имеет приоритет, шим не мешает) — НЕ удалять из папки
+# → собираются ЧЕТЫРЕ версии (две линии: Win10/11 на Python 3.12 и Win7 на 3.8):
+#   Линия Win10/11 (job build, Python 3.12, PyInstaller 6):
+#     seavision-windows-x64            — штатная, БЕЗ matplotlib (pics=false)
+#     seavision-windows-x64-debug      — С matplotlib (для pics=<путь>, debug-картинки)
+#     → в оба кладётся шим api-ms-win-core-path-l1-1-0.dll (даёт работу на Win8.1;
+#       на Win10+ системная DLL имеет приоритет, шим не мешает) — НЕ удалять из папки
+#   Линия Win7 (job build-win7, Python 3.8, PyInstaller 5.13.2):
+#     seavision-windows-x64-win7       — штатная, БЕЗ matplotlib
+#     seavision-windows-x64-win7-debug — С matplotlib
+#     → шим НЕ нужен (Python 3.8 не импортирует path/PSS API из kernel32)
+# → ВАЖНО: сборка на Python 3.12 на Win7 НЕ запускается (нет PssQuerySnapshot в
+#   kernel32 семёрки) — для Windows 7 брать ТОЛЬКО артефакты *-win7
 # → скачать нужный артефакт → положить config.ini рядом с seavision.exe
 
 ```
@@ -301,10 +308,14 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 | `test/tester_transmit.py` | Генератор тестового потока |
 | `seavision-win.spec` | PyInstaller onedir для Windows (**без** matplotlib, без UPX) → `dist/seavision/` |
 | `seavision-win-debug.spec` | То же, но **С** matplotlib (Agg-backend) для `pics=<путь>` → `dist-debug/seavision/` |
+| `seavision-win7.spec` | Win7-совместимая штатная сборка (Python 3.8, PyInstaller 5, **без** `optimize=`, без matplotlib) → `dist-win7/seavision/` |
+| `seavision-win7-debug.spec` | То же + matplotlib для Win7 → `dist-win7-debug/seavision/` |
 | `seavision.spec` | PyInstaller spec для локальной сборки (Linux/общий) |
 | `requirements-win.txt` | numpy, scipy, netCDF4, cftime — минимум для штатного Windows-бандла |
 | `requirements-win-debug.txt` | то же + matplotlib (для debug-сборки) |
-| `.github/workflows/build-windows.yml` | GHA: Windows x64 → артефакты `seavision-windows-x64` (штатная) и `seavision-windows-x64-debug` (с matplotlib) |
+| `requirements-win7.txt` | Пины под Python 3.8/Win7: numpy==1.24.4, scipy==1.10.1, netCDF4==1.6.5, cftime==1.6.3 |
+| `requirements-win7-debug.txt` | то же + matplotlib==3.7.5 |
+| `.github/workflows/build-windows.yml` | GHA: job `build` (Python 3.12 → `seavision-windows-x64[-debug]`) + job `build-win7` (Python 3.8 → `seavision-windows-x64-win7[-debug]`) |
 | `udp_protocol.docx` | **Авторитетный** протокол v2.0 (новый) |
 | `sv_protocol_2204.docx` | Старый протокол (1398 байт), режим `protocol = old` |
 | `batch_process.py` | Пакетная обработка; `_SIGNAL_BAND=10`, `_MAX_CURRENT=3.0`; разделение на I/O (`_load_frames` → dict с `cbck`/navi/`buoy_proc`) и вычисление (`_compute_from_frames`); `params.csv` содержит поля из `_PARAMS_FIELDS` (включая `swh`, `t_p`, `d_p`, `curr_*`, `wspd_proc`, `u_x/u_y`, `swh_buoy` и др.); `wt_m` всегда 0.0, т.к. `calc_partitions` не возвращает `t_m` для систем; буй: окно `_BUOY_SKIP_SEC=420` (7 мин) — `_BUOY_END_SEC=2220` (37 мин) |
