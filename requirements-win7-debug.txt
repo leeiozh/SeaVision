@@ -1,0 +1,7 @@
+# Win7-совместимая debug-линия: то же, что requirements-win7.txt, плюс matplotlib
+# (последняя версия с cp38-колёсами) для режима pics=<путь>.
+numpy==1.24.4
+scipy==1.10.1
+netCDF4==1.6.5
+cftime==1.6.3
+matplotlib==3.7.5
