@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 """
-Batch processing of NetCDF radar files — one result per file from first N_SHOTS frames.
-No averaging, no processing/step parameters.
+Batch processing of NetCDF radar files.
+
+Each NC file is split into non-overlapping N_SHOTS-frame segments; every segment
+produces one row in params.csv (column seg_idx tracks position within the file).
 
 Usage:
-    python batch_process.py [--csv META_upd.csv] [--base-path /storage/thalassa/DATA/RADAR/]
+    python batch_process.py [--csv META_upd2.csv] [--base-path /storage/thalassa/DATA/RADAR/]
                             [--out batch_out] [--config config.ini]
+                            [--no-pics] [--no-spectra]
+
+Flags:
+    --no-pics      Skip diagnostic PNG figures (faster; recommended for large runs)
+    --no-spectra   Skip saving .npy spectrum files (faster)
 
 Input CSV: any CSV with a 'name' column of relative NC paths; --base-path is prepended.
 Output:
-    {out}/params.csv                  — DataFrame with computed columns
-    {out}/spec/{name}_freqspec.npy    — shape (N_FREQ,),        int [0..255]
-    {out}/spec/{name}_dirspec.npy     — shape (N_DIRS, N_FREQ), int [0..255]
-    {out}/pics/{name}.png             — diagnostic figure
+    {out}/params.csv                  — one row per segment (seg_idx = 0-based segment index)
+    {out}/spec/{name}_freqspec.npy    — shape (N_FREQ,),        int [0..255]  (if --no-spectra not set)
+    {out}/spec/{name}_dirspec.npy     — shape (N_DIRS, N_FREQ), int [0..255]  (if --no-spectra not set)
+    {out}/pics/{name}.png             — diagnostic figure                      (if --no-pics not set)
 """
 
 import argparse
@@ -55,7 +62,7 @@ _SYS_COLORS = ['cyan', 'lime', 'orange']
 
 
 _PARAMS_FIELDS = [
-    "name", "pulse", "quality",
+    "name", "seg_idx", "pulse", "quality",
     "swh", "t_p", "t_m", "d_p", "d_m",
     "wswh", "wt_p", "wt_m", "wd_p",
     "sw1_swh", "sw1_t_p", "sw1_d_p",
@@ -714,11 +721,21 @@ def _save_pic(name, spec_1d, spec_2d, freq_out, ring, sys_dict,
 
 # ── processing ────────────────────────────────────────────────────────────────
 
-def _load_frames(name, nc_path, pulse, cfg, log):
+def _count_frames(nc_path):
+    """Return total frame count in an NC file without reading image data."""
+    try:
+        from netCDF4 import Dataset
+        with Dataset(nc_path, 'r') as ds:
+            return int(ds["time_radar"].shape[0])
+    except Exception:
+        return 0
+
+
+def _load_frames(name, nc_path, pulse, cfg, log, seg_start=0, buoy_proc=None):
     """
-    I/O phase: read N_SHOTS frames from NC file + buoy data if applicable.
+    I/O phase: read N_SHOTS frames starting at seg_start from NC file.
     Returns dict with raw arrays or None on failure.
-    Designed to run in a background thread while the previous file is computed.
+    buoy_proc should be pre-computed once per file and passed here.
     """
     cst = cfg.const
     seg_azimuths = np.linspace(0, 360, cst.NUM_AREA, endpoint=False)
@@ -729,7 +746,10 @@ def _load_frames(name, nc_path, pulse, cfg, log):
         source = NCInputSource(nc_path)
     except Exception as exc:
         log.error(f'{name}: cannot open {nc_path!r}: {exc}')
-        return None
+        return 'file_error'
+
+    # Seek to segment start without reading image data
+    source.curr_ind = seg_start - 1
 
     cbck = np.zeros((cst.NUM_AREA, cst.N_SHOTS, 2 * cst.ASP, 2 * cst.ASP), dtype=np.float32)
     last_bck = None
@@ -743,7 +763,7 @@ def _load_frames(name, nc_path, pulse, cfg, log):
         for t in range(cst.N_SHOTS):
             back = source.get_bck()
             if back.step == 0.0:
-                log.warning(f'{name}: only {t} frames (need {cst.N_SHOTS}), skipping')
+                log.warning(f'{name}: seg_start={seg_start}, only {t} frames in segment, skipping')
                 return None
             navi = source.get_navi()
             last_bck = back.bck
@@ -758,21 +778,13 @@ def _load_frames(name, nc_path, pulse, cfg, log):
                 row1 = last_bck[y + 1, x] * (1.0 - wx) + last_bck[y + 1, x + 1] * wx
                 cbck[i, t] = row0 * (1.0 - wy) + row1 * wy
     except Exception as exc:
-        log.error(f'{name}: read error: {exc}', exc_info=True)
+        log.error(f'{name}: read error at seg_start={seg_start}: {exc}', exc_info=True)
         return None
     finally:
         try:
             source.close()
         except Exception:
             pass
-    n_navi = max(n_navi, 1)
-    om_max = np.pi * (cst.RPM or 25) / 60.0   # batch is offline: no live RPM, fall back to 25
-
-    buoy_proc = None
-    if '0606' in name or '0105' in name:
-        raw_buoy = _load_buoy_data(nc_path)
-        if raw_buoy is not None:
-            buoy_proc = _compute_buoy_spectra(raw_buoy, cst.N_FREQ, om_max)
 
     return {
         'cbck':      cbck,
@@ -1013,94 +1025,140 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
     return row, spec_1d, spec_2d
 
 
-def _process_file(name, nc_path, pulse, cfg, spec_dir, pics_dir, log, wind_meta=None):
-    """Thin wrapper: load frames then compute. Used by single-process batch and legacy callers."""
-    frames = _load_frames(name, nc_path, pulse, cfg, log)
-    if frames is None:
-        return None
+def _process_file(name, nc_path, pulse, cfg, spec_dir, pics_dir, log,
+                  wind_meta=None, seg_start=0, buoy_proc=None):
+    """Thin wrapper: load frames then compute. Used by single-process batch and legacy callers.
+    Returns None on algorithm failure, 'file_error' if the file cannot be opened."""
+    frames = _load_frames(name, nc_path, pulse, cfg, log, seg_start=seg_start, buoy_proc=buoy_proc)
+    if frames is None or frames == 'file_error':
+        return frames
     return _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta)
 
 
 def main():
     parser = argparse.ArgumentParser(description='Batch NC radar file processing')
-    parser.add_argument('--csv',       default='META_upd2.csv')
-    parser.add_argument('--base-path', default='') # /storage/thalassa/DATA/RADAR/
-    parser.add_argument('--out',       default='batch_out')
-    parser.add_argument('--config',    default='config.ini')
+    parser.add_argument('--csv',        default='META_with_era5.csv')
+    parser.add_argument('--base-path',  default='')
+    parser.add_argument('--out',        default='batch_out')
+    parser.add_argument('--config',     default='config.ini')
+    parser.add_argument('--no-pics',    action='store_true',
+                        help='Skip diagnostic PNG figures (faster)')
+    parser.add_argument('--no-spectra', action='store_true',
+                        help='Skip saving .npy spectrum files (faster)')
     args = parser.parse_args()
 
     log = setup_logger('batch')
     cfg = load_config(args.config)
 
-    spec_dir    = os.path.join(args.out, 'spec')
-    pics_dir    = os.path.join(args.out, 'pics')
     params_path = os.path.join(args.out, 'params.csv')
-    os.makedirs(args.out,   exist_ok=True)
-    os.makedirs(spec_dir,   exist_ok=True)
-    os.makedirs(pics_dir,   exist_ok=True)
+    os.makedirs(args.out, exist_ok=True)
+
+    spec_dir = None
+    pics_dir = None
+    if not args.no_spectra:
+        spec_dir = os.path.join(args.out, 'spec')
+        os.makedirs(spec_dir, exist_ok=True)
+    if not args.no_pics:
+        pics_dir = os.path.join(args.out, 'pics')
+        os.makedirs(pics_dir, exist_ok=True)
 
     df = pd.read_csv(args.csv)
     df = df[df["bswh"].notna()]
     if 'pulse' in df.columns:
         df['pulse'] = df['pulse'].apply(_pulse_str)
 
-    # Resume: skip files already written to params.csv
+    # Resume: skip (name, seg_idx) pairs already written to params.csv
     done = set()
     if os.path.exists(params_path):
         try:
-            done = set(pd.read_csv(params_path, usecols=['name'])['name'].dropna())
+            _d = pd.read_csv(params_path, usecols=['name', 'seg_idx'])
+            done = set(zip(_d['name'].astype(str), _d['seg_idx'].astype(int)))
             if done:
-                log.info(f'Resume: skipping {len(done)} already-done files')
+                log.info(f'Resume: skipping {len(done)} already-done segments')
         except Exception as exc:
             log.warning(f'Could not read existing {params_path}: {exc}')
 
-    # Full column list: source CSV columns first (name → stem), then computed-only.
-    # This matches the historical params.csv layout and allows stable resume.
-    _computed_only = [c for c in _PARAMS_FIELDS if c not in df.columns]
-    all_fields = list(df.columns) + _computed_only
+    # Build output column list: meta CSV columns first (name→stem, seg_idx inserted after name),
+    # then remaining computed-only fields.
+    base_cols = list(df.columns)
+    _name_pos = base_cols.index('name') + 1 if 'name' in base_cols else len(base_cols)
+    base_cols.insert(_name_pos, 'seg_idx')
+    _computed_only = [c for c in _PARAMS_FIELDS if c not in base_cols]
+    all_fields = base_cols + _computed_only
 
     write_header = not os.path.exists(params_path)
     n_done = 0
 
     has_wind = {'u_10', 'v_10'}.issubset(df.columns)
-    log.info(f"Batch: {len(df)} rows → '{args.out}'  (N_SHOTS={cfg.const.N_SHOTS})")
+    log.info(f"Batch: {len(df)} rows → '{args.out}'  (N_SHOTS={cfg.const.N_SHOTS}  "
+             f"pics={'off' if args.no_pics else 'on'}  "
+             f"spectra={'off' if args.no_spectra else 'on'})")
 
     for _, row in df.iterrows():
         name = row['name'].split('/')[-1][:-3]
-        if name in done:
-            continue
         path = args.base_path + row['name']
         pulse = row.get('pulse', 'MP')
-        # Carry all source columns through; replace 'name' with stem.
         meta_dict = {c: (name if c == 'name' else row[c]) for c in df.columns}
+
+        wind_meta = None
+        if has_wind and pd.notna(row.get('u_10')) and pd.notna(row.get('v_10')):
+            wind_meta = {'u_10': float(row['u_10']), 'v_10': float(row['v_10'])}
+
+        # Count frames once per file to determine how many segments are available
         try:
-            wind_meta = None
-            if has_wind and pd.notna(row.get('u_10')) and pd.notna(row.get('v_10')):
-                wind_meta = {'u_10': float(row['u_10']), 'v_10': float(row['v_10'])}
-
-            result = _process_file(name, path, pulse, cfg, spec_dir, pics_dir, log,
-                                   wind_meta=wind_meta)
-            if result is None:
-                log.warning(f'{name}: processing failed')
-                continue
-
-            params, spec_1d, spec_2d = result
-            full_params = {**meta_dict, **params}   # computed overrides name/pulse
-            try:
-                pd.DataFrame([full_params]).reindex(columns=all_fields).to_csv(
-                    params_path, mode='a', header=write_header, index=False,
-                    float_format='%.4f'
-                )
-                write_header = False
-                n_done += 1
-                log.info(f'[{n_done}] {name}: quality={params["quality"]}  swh={params["swh"]:.2f}m')
-            except Exception as exc:
-                log.error(f'{name}: CSV write failed: {exc}', exc_info=True)
-
+            n_total = _count_frames(path)
         except Exception as exc:
-            log.error(f'{name}: fatal error: {exc}', exc_info=True)
-        finally:
-            gc.collect()
+            log.error(f'{name}: cannot count frames: {exc}')
+            continue
+        if n_total < cfg.const.N_SHOTS:
+            log.warning(f'{name}: only {n_total} frames (need {cfg.const.N_SHOTS}), skipping')
+            continue
+        n_segs = n_total // cfg.const.N_SHOTS
+        log.info(f'{name}: {n_total} frames → {n_segs} segment(s) of {cfg.const.N_SHOTS}')
+
+        # Load buoy data once per file (shared across all segments)
+        om_max = np.pi * (cfg.const.RPM or 25) / 60.0
+        buoy_proc = None
+        if '0606' in name or '0105' in name:
+            raw_buoy = _load_buoy_data(path)
+            if raw_buoy is not None:
+                buoy_proc = _compute_buoy_spectra(raw_buoy, cfg.const.N_FREQ, om_max)
+
+        for seg_idx in range(n_segs):
+            if (name, seg_idx) in done:
+                continue
+            seg_start = seg_idx * cfg.const.N_SHOTS
+            try:
+                result = _process_file(
+                    name, path, pulse, cfg, spec_dir, pics_dir, log,
+                    wind_meta=wind_meta, seg_start=seg_start, buoy_proc=buoy_proc,
+                )
+                if result == 'file_error':
+                    log.error(f'{name}: file became inaccessible at seg {seg_idx}, skipping rest')
+                    break
+                if result is None:
+                    log.warning(f'{name}[{seg_idx}]: processing failed')
+                    continue
+
+                params, spec_1d, spec_2d = result
+                params['seg_idx'] = seg_idx
+                full_params = {**meta_dict, **params}
+                try:
+                    pd.DataFrame([full_params]).reindex(columns=all_fields).to_csv(
+                        params_path, mode='a', header=write_header, index=False,
+                        float_format='%.4f'
+                    )
+                    write_header = False
+                    n_done += 1
+                    log.info(f'[{n_done}] {name}[{seg_idx}/{n_segs-1}]: '
+                             f'quality={params["quality"]}  swh={params["swh"]:.2f}m')
+                except Exception as exc:
+                    log.error(f'{name}[{seg_idx}]: CSV write failed: {exc}', exc_info=True)
+
+            except Exception as exc:
+                log.error(f'{name}[{seg_idx}]: fatal error: {exc}', exc_info=True)
+            finally:
+                gc.collect()
 
     log.info(f"Done: {n_done} new rows → '{params_path}'")
 
