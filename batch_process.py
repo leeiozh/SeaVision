@@ -1037,7 +1037,7 @@ def _process_file(name, nc_path, pulse, cfg, spec_dir, pics_dir, log,
 
 def main():
     parser = argparse.ArgumentParser(description='Batch NC radar file processing')
-    parser.add_argument('--csv',        default='META_with_era5.csv')
+    parser.add_argument('--csv',        default='META_upd.csv')
     parser.add_argument('--base-path',  default='')
     parser.add_argument('--out',        default='batch_out')
     parser.add_argument('--config',     default='config.ini')
@@ -1063,7 +1063,7 @@ def main():
         os.makedirs(pics_dir, exist_ok=True)
 
     df = pd.read_csv(args.csv)
-    df = df[df["bswh"].notna()]
+    # df = df[df["bswh"].notna()]
     if 'pulse' in df.columns:
         df['pulse'] = df['pulse'].apply(_pulse_str)
 
@@ -1119,7 +1119,7 @@ def main():
         # Load buoy data once per file (shared across all segments)
         om_max = np.pi * (cfg.const.RPM or 25) / 60.0
         buoy_proc = None
-        if '0606' in name or '0105' in name:
+        if '0606' in name or '0105' in name or "0584" in name:
             raw_buoy = _load_buoy_data(path)
             if raw_buoy is not None:
                 buoy_proc = _compute_buoy_spectra(raw_buoy, cfg.const.N_FREQ, om_max)
