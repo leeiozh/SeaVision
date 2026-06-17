@@ -3,5 +3,3 @@
 # поддержкой Windows 7). Штатная сборка — БЕЗ matplotlib (pics=false).
 numpy==1.24.4
 scipy==1.10.1
-netCDF4==1.6.5
-cftime==1.6.3

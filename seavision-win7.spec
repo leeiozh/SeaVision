@@ -15,6 +15,8 @@ excludes = [
     'wx', 'gi', 'gtk',
     # matplotlib — только для дебага (pics=false в штатной работе)
     'matplotlib',
+    # NC/буй — нужны только для отладки (type=nc), в продакшне type=udp
+    'netCDF4', 'cftime',
     # тяжёлые пакеты, не нужны для main.py
     'pandas',
     'xarray',
