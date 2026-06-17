@@ -33,6 +33,7 @@ def _build_source(cfg):
 def _build_sinks(cfg):
     sinks = []
     if cfg.output.get("udp", "false") == "true":
+        proto = cfg.output.get("protocol", "new")
         sinks.append(UdpOutputSink(
             cfg.output["server_ip"],
             int(cfg.output["server_port"]),
@@ -40,8 +41,19 @@ def _build_sinks(cfg):
             cfg.const.N_DIRS,
             cfg.const.N_FREQ_2D,
             cfg.const.ALGO_VERSION,
-            cfg.output.get("protocol", "new"),
+            proto,
         ))
+        ip2   = cfg.output.get("server_ip2",   "").strip()
+        port2 = cfg.output.get("server_port2", "").strip()
+        if ip2 and port2:
+            sinks.append(UdpOutputSink(
+                ip2, int(port2),
+                cfg.const.N_FREQ,
+                cfg.const.N_DIRS,
+                cfg.const.N_FREQ_2D,
+                cfg.const.ALGO_VERSION,
+                cfg.output.get("protocol2", proto),
+            ))
     if cfg.output.get("file", "false") == "true":
         sinks.append(CSVOutputSink(cfg.output["save_path"], cfg.const))
     return sinks
