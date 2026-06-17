@@ -31,9 +31,11 @@ a = Analysis(
     datas=[],           # config.ini кладётся рядом с exe после установки
     hiddenimports=[
         'scipy.special.cython_special',
+        'scipy.fft',
         'scipy.signal',
+        'scipy.integrate',
         'scipy.ndimage',
-        'scipy.interpolate',
+        'scipy.optimize',
         'netCDF4',
         'cftime',
         # matplotlib: только Agg-backend (savefig в PNG, без GUI)

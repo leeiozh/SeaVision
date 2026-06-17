@@ -28,7 +28,6 @@ import os
 import traceback
 import numpy as np
 import pandas as pd
-from scipy.interpolate import interp1d
 
 from src.config import load_config
 from src.io.input import NCInputSource
@@ -940,8 +939,10 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         out_om      = np.linspace(0, om_max, cst.N_FREQ)
         freq_out    = out_om / (2 * np.pi)
         s_omega_out = np.interp(out_om, omega_vals, s_omega)
-        s_om_th_out = interp1d(omega_vals, s_om_th, axis=1, kind='linear',
-                                fill_value=0.0, bounds_error=False)(out_om)
+        s_om_th_out = np.vstack([
+            np.interp(out_om, omega_vals, row, left=0.0, right=0.0)
+            for row in s_om_th
+        ])
 
         spec_1d = _norm255(s_omega_out.copy())   # [0..255] int — transmitted
         spec_2d = _norm255(s_om_th_out.copy())   # [0..255] int — transmitted
@@ -1037,7 +1038,7 @@ def _process_file(name, nc_path, pulse, cfg, spec_dir, pics_dir, log,
 
 def main():
     parser = argparse.ArgumentParser(description='Batch NC radar file processing')
-    parser.add_argument('--csv',        default='META_upd.csv')
+    parser.add_argument('--csv',        default='META_upd2.csv')
     parser.add_argument('--base-path',  default='')
     parser.add_argument('--out',        default='batch_out')
     parser.add_argument('--config',     default='config.ini')

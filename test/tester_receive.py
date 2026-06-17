@@ -5,8 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
-MY_IP   = '192.168.192.185'
-# MY_IP = '127.0.0.1'
+# MY_IP   = '192.168.192.185'
+MY_IP = '127.0.0.1'
 IN_PORT = 4000
 
 N_FREQS   = 64    # spec_1d frequency bins

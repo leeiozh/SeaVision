@@ -1,7 +1,10 @@
 import numpy as np
 from scipy.fft import fft2, fftshift
 from scipy.signal import welch
-from scipy.integrate import trapezoid
+try:
+    from scipy.integrate import trapezoid
+except ImportError:          # scipy < 1.11 (Win7 bundle: scipy==1.10.1)
+    from scipy.integrate import trapz as trapezoid
 from scipy.ndimage import gaussian_filter, gaussian_filter1d
 
 

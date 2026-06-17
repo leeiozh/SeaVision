@@ -198,15 +198,15 @@ class Wave:
 
     def sum(self, other, size):
         """Accumulate other/size into self — one step of a running mean over `size` frames."""
-        t_p = other.t_p if np.isfinite(other.t_p) else 0.0
-        t_m = other.t_m if np.isfinite(other.t_m) else 0.0
+        def _f(v):
+            return v if np.isfinite(v) else 0.0
         return Wave(
-            snr=self.snr + other.snr / size,
-            swh=self.swh + other.swh / size,
-            t_p=self.t_p + t_p / size,
-            t_m=self.t_m + t_m / size,
-            d_p=self.d_p + other.d_p / size,
-            d_m=self.d_m + other.d_m / size,
+            snr=self.snr + _f(other.snr) / size,
+            swh=self.swh + _f(other.swh) / size,
+            t_p=self.t_p + _f(other.t_p) / size,
+            t_m=self.t_m + _f(other.t_m) / size,
+            d_p=self.d_p + _f(other.d_p) / size,
+            d_m=self.d_m + _f(other.d_m) / size,
         )
 
     def print(self):
@@ -269,16 +269,26 @@ class WaveOutput:
 
     Holds wave parameters and un-normalised spectra for one processor cycle.
     Averager.get_mean() accumulates MEAN of these into a final Output object.
+
+    Scalar environment fields (wspd, wind_dir, curr_speed, curr_dir) are stored
+    here so the Averager can apply proper averaging (arithmetic or circular mean)
+    across MEAN cycles independently from peak/system parameters.
     """
 
-    def __init__(self, ide_sys, wave_sum, wave_win, wave_sw1, wave_sw2, spec_1d, spec_2d):
-        self.ide_sys = ide_sys
-        self.wave_sum = wave_sum
-        self.wave_win = wave_win
-        self.wave_sw1 = wave_sw1
-        self.wave_sw2 = wave_sw2
-        self.spec_1d = spec_1d
-        self.spec_2d = spec_2d
+    def __init__(self, ide_sys, wave_sum, wave_win, wave_sw1, wave_sw2, spec_1d, spec_2d,
+                 wspd: float = 0.0, wind_dir: float = 0.0,
+                 curr_speed: float = 0.0, curr_dir: float = 0.0):
+        self.ide_sys    = ide_sys
+        self.wave_sum   = wave_sum
+        self.wave_win   = wave_win
+        self.wave_sw1   = wave_sw1
+        self.wave_sw2   = wave_sw2
+        self.spec_1d    = spec_1d
+        self.spec_2d    = spec_2d
+        self.wspd       = wspd
+        self.wind_dir   = wind_dir
+        self.curr_speed = curr_speed
+        self.curr_dir   = curr_dir
 
 
 class ProcessResult:

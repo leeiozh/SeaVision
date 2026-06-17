@@ -1,6 +1,4 @@
 import numpy as np
-from scipy.interpolate import interp1d
-
 import logging as _logging
 _log = _logging.getLogger(__name__)
 
@@ -400,7 +398,7 @@ class Processor:
         result   = None
         port_out = None
 
-        if s.index >= cst.N_SHOTS and s.index % int(self.cfg.output["out_times"]) == 0:
+        if s.index >= cst.N_SHOTS and s.index % int(self.cfg.output.get("out_times", 32)) == 0:
 
             sig, wdir = calc_wspd(bck)
             ring_sig  = float(np.std(
@@ -543,15 +541,19 @@ class Processor:
 
             spec_1d = np.interp(
                 np.linspace(0, self.om_max, cst.N_FREQ), omega_vals, s_omega)
-            f_interp = interp1d(omega_vals, s_om_th, axis=1, kind='linear',
-                                fill_value=0.0, bounds_error=False)
-            spec_2d = f_interp(np.linspace(0, self.om_max, cst.N_FREQ_2D))
+            _om_out = np.linspace(0, self.om_max, cst.N_FREQ_2D)
+            spec_2d = np.vstack([
+                np.interp(_om_out, omega_vals, row, left=0.0, right=0.0)
+                for row in s_om_th
+            ])
 
             wave_out = WaveOutput(
                 ide_sys=sys["n_sys"],
                 wave_sum=wave_sum, wave_win=wave_win,
                 wave_sw1=wave_sw1, wave_sw2=wave_sw2,
                 spec_1d=spec_1d, spec_2d=spec_2d,
+                wspd=wspd, wind_dir=wdir,
+                curr_speed=curr_speed, curr_dir=curr_dir,
             )
 
             # ── Debug plots ───────────────────────────────────────────────────
@@ -574,14 +576,10 @@ class Processor:
             )
 
             if result is not None:
-                result.sog_proc  = navi.sog
-                result.cog_proc  = navi.cog
-                result.n_start   = round(navi.hdg)
-                result.curr_speed = curr_speed
-                result.curr_dir   = curr_dir
-                result.wind_dir   = wdir
-                result.wspd       = wspd
-                result.n_dis      = quality
+                result.sog_proc = navi.sog
+                result.cog_proc = navi.cog
+                result.n_start  = round(navi.hdg)
+                result.n_dis    = quality   # quality: always from current computation
 
         s.index += 1
         return {

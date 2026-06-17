@@ -1,5 +1,5 @@
 import sys
-from socket import socket, error, AF_INET, SOCK_DGRAM, SOL_SOCKET, SO_RCVBUF, SO_BROADCAST
+from socket import socket, error, AF_INET, SOCK_DGRAM, SOL_SOCKET, SO_RCVBUF, SO_SNDBUF
 
 _FRAME_SIZE_BYTES = 4096 * 2 * 1032   # ≈ 8.45 MB
 
@@ -37,7 +37,7 @@ def create_out_socket(port, size=0):
     try:
         sock = socket(AF_INET, SOCK_DGRAM)
         if size != 0:
-            sock.setsockopt(SOL_SOCKET, SO_BROADCAST, 1024 * 1024 * size)
+            sock.setsockopt(SOL_SOCKET, SO_SNDBUF, 1024 * 1024 * size)
         return sock
     except error as err:
         print(f"Failed to create and bind socket to {port}. Error: {err}")

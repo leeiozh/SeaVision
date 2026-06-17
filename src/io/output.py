@@ -1,8 +1,69 @@
+import logging
 import numpy as np
 from struct import pack
 from datetime import datetime
 from src.io.service import create_out_socket
 from src.io.structs import Wave, Navi, ProcessResult
+
+_log = logging.getLogger(__name__)
+
+# ── Physical sanity limits applied before any transmission ────────────────────
+# Values outside these ranges are clipped to the boundary and a warning is logged.
+# They reflect hard physical upper bounds for surface gravity waves measured by
+# a rotating maritime radar; exceedances indicate algorithmic artifacts.
+_PHYS_SWH_MAX    = 20.0   # m   — above max reliable open-ocean Hs record (~18 m)
+_PHYS_PERIOD_MAX = 30.0   # s   — surface gravity wave swell ceiling; bin-1 artifact can
+                           #       reach ~600 s at 25 RPM — must be clipped
+_PHYS_WSPD_MAX   = 30.0   # m/s — Beaufort 12 = 32.7 m/s; radar estimate saturates earlier
+_PHYS_CURR_MAX   =  3.0   # m/s — matches processor clip (_MAX_CURRENT = 3.0 m/s)
+
+
+def _phys_clip(o) -> None:
+    """Clip all scalar wave parameters to physical bounds in-place.
+
+    Called once per ProcessResult before any sink serialises the Output.
+    Idempotent — safe to call from multiple sinks on the same object.
+    Logs a WARNING the first time a field is clipped (use DEBUG for every event).
+    """
+    def _cw(w: Wave, tag: str) -> None:
+        if not np.isfinite(w.swh) or w.swh < 0.0:
+            w.swh = 0.0
+        elif w.swh > _PHYS_SWH_MAX:
+            _log.warning("SWH clip [%s]: %.2f → %.2f m", tag, w.swh, _PHYS_SWH_MAX)
+            w.swh = _PHYS_SWH_MAX
+        if not np.isfinite(w.t_p) or w.t_p < 0.0:
+            w.t_p = 0.0
+        elif w.t_p > _PHYS_PERIOD_MAX:
+            _log.warning("T_p  clip [%s]: %.1f → %.1f s", tag, w.t_p, _PHYS_PERIOD_MAX)
+            w.t_p = _PHYS_PERIOD_MAX
+        if not np.isfinite(w.t_m) or w.t_m < 0.0:
+            w.t_m = 0.0
+        elif w.t_m > _PHYS_PERIOD_MAX:
+            _log.warning("T_m  clip [%s]: %.1f → %.1f s", tag, w.t_m, _PHYS_PERIOD_MAX)
+            w.t_m = _PHYS_PERIOD_MAX
+
+    _cw(o.wave_sum, "sum")
+    _cw(o.wave_win, "win")
+    _cw(o.wave_sw1, "sw1")
+    _cw(o.wave_sw2, "sw2")
+
+    curr = getattr(o, 'curr_speed', 0.0)
+    if not np.isfinite(curr):
+        o.curr_speed = 0.0
+    elif curr > _PHYS_CURR_MAX:
+        _log.warning("curr_speed clip: %.2f → %.2f m/s", curr, _PHYS_CURR_MAX)
+        o.curr_speed = _PHYS_CURR_MAX
+    elif curr < 0.0:
+        o.curr_speed = 0.0
+
+    wspd = getattr(o, 'wspd', 0.0)
+    if not np.isfinite(wspd):
+        o.wspd = 0.0
+    elif wspd > _PHYS_WSPD_MAX:
+        _log.warning("wspd clip: %.2f → %.2f m/s", wspd, _PHYS_WSPD_MAX)
+        o.wspd = _PHYS_WSPD_MAX
+    elif wspd < 0.0:
+        o.wspd = 0.0
 
 
 class OutputSink:
@@ -16,8 +77,17 @@ class OutputSink:
 
 
 def _u16(x):
-    """Clip a value to the uint16 range so struct.pack never raises."""
+    """Clip a value to the uint16 range. Returns 0 for NaN/inf."""
+    if not np.isfinite(x):
+        return 0
     return int(np.clip(round(x), 0, 65535))
+
+
+def _dir(x):
+    """Convert a direction to integer degrees [0, 359]. Returns 0 for NaN/inf."""
+    if not np.isfinite(x):
+        return 0
+    return int(round(x)) % 360
 
 
 class UdpOutputSink(OutputSink):
@@ -49,6 +119,7 @@ class UdpOutputSink(OutputSink):
         self.protocol = str(protocol).lower()
 
     def send(self, result: ProcessResult):
+        _phys_clip(result.output)
         if self.protocol == "old":
             data = self._pack_old(result.output)
         else:
@@ -65,24 +136,19 @@ class UdpOutputSink(OutputSink):
         data = pack(
             f"<BBHHHHHHHHHHHHHHHHHHHHBBHHHH"
             f"{self.n_freqs}B{self.n_freq_2d * self.n_dirs}B",
-            5, o.pulse,
-            round(o.step * 1000), round(o.rps * 100),
+            5, int(np.clip(o.pulse, 0, 255)),
+            _u16(o.step * 1000), _u16(o.rps * 100),
             # summary — all 5 fields
-            round(o.wave_sum.swh * 100), round(o.wave_sum.t_p * 100), round(o.wave_sum.t_m * 100),
-            int(round(o.wave_sum.d_p)) % 360, int(round(o.wave_sum.d_m)) % 360,
+            _u16(o.wave_sum.swh * 100), _u16(o.wave_sum.t_p * 100), _u16(o.wave_sum.t_m * 100),
+            _dir(o.wave_sum.d_p), _dir(o.wave_sum.d_m),
             # wind wave — swh, t_p, dir_p only
-            round(o.wave_win.swh * 100), round(o.wave_win.t_p * 100),
-            int(round(o.wave_win.d_p)) % 360,
+            _u16(o.wave_win.swh * 100), _u16(o.wave_win.t_p * 100), _dir(o.wave_win.d_p),
             # swell 1 — swh, t_p, dir_p only
-            round(o.wave_sw1.swh * 100), round(o.wave_sw1.t_p * 100),
-            int(round(o.wave_sw1.d_p)) % 360,
+            _u16(o.wave_sw1.swh * 100), _u16(o.wave_sw1.t_p * 100), _dir(o.wave_sw1.d_p),
             # swell 2 — swh, t_p, dir_p only
-            round(o.wave_sw2.swh * 100), round(o.wave_sw2.t_p * 100),
-            int(round(o.wave_sw2.d_p)) % 360,
-            round(getattr(o, 'curr_speed', 0.0) * 100),
-            int(round(getattr(o, 'curr_dir', 0.0))) % 360,
-            int(np.clip(round(getattr(o, 'wspd', 0.0) * 10), 0, 65535)),
-            int(round(getattr(o, 'wind_dir', 0.0))) % 360,
+            _u16(o.wave_sw2.swh * 100), _u16(o.wave_sw2.t_p * 100), _dir(o.wave_sw2.d_p),
+            _u16(getattr(o, 'curr_speed', 0.0) * 100), _dir(getattr(o, 'curr_dir', 0.0)),
+            _u16(getattr(o, 'wspd', 0.0) * 10), _dir(getattr(o, 'wind_dir', 0.0)),
             o.ide_sys, o.n_dis,
             self.algo_version, 0, 0, 0,
             *o.spec_1d,
@@ -110,23 +176,17 @@ class UdpOutputSink(OutputSink):
             f"<B17HB{self.n_freqs}BBB{self.n_freq_2d * self.n_dirs}B",
             5,
             # summary — swh, t_p, dir_p
-            _u16(o.wave_sum.swh * 100), _u16(o.wave_sum.t_p * 100),
-            int(round(o.wave_sum.d_p)) % 360,
+            _u16(o.wave_sum.swh * 100), _u16(o.wave_sum.t_p * 100), _dir(o.wave_sum.d_p),
             # wind wave — swh, t_p, dir_p
-            _u16(o.wave_win.swh * 100), _u16(o.wave_win.t_p * 100),
-            int(round(o.wave_win.d_p)) % 360,
+            _u16(o.wave_win.swh * 100), _u16(o.wave_win.t_p * 100), _dir(o.wave_win.d_p),
             # swell 1 — swh, t_p, dir_p
-            _u16(o.wave_sw1.swh * 100), _u16(o.wave_sw1.t_p * 100),
-            int(round(o.wave_sw1.d_p)) % 360,
+            _u16(o.wave_sw1.swh * 100), _u16(o.wave_sw1.t_p * 100), _dir(o.wave_sw1.d_p),
             # swell 2 — swh, t_p, dir_p
-            _u16(o.wave_sw2.swh * 100), _u16(o.wave_sw2.t_p * 100),
-            int(round(o.wave_sw2.d_p)) % 360,
+            _u16(o.wave_sw2.swh * 100), _u16(o.wave_sw2.t_p * 100), _dir(o.wave_sw2.d_p),
             # wind — speed (×100 → hundredths m/s), dir
-            _u16(getattr(o, 'wspd', 0.0) * 100),
-            int(round(getattr(o, 'wind_dir', 0.0))) % 360,
+            _u16(getattr(o, 'wspd', 0.0) * 100), _dir(getattr(o, 'wind_dir', 0.0)),
             # current — speed (×1000 → thousandths m/s), dir
-            _u16(getattr(o, 'curr_speed', 0.0) * 1000),
-            int(round(getattr(o, 'curr_dir', 0.0))) % 360,
+            _u16(getattr(o, 'curr_speed', 0.0) * 1000), _dir(getattr(o, 'curr_dir', 0.0)),
             # antenna rate — thousandths of rpm (×1000)
             _u16(o.rps * 1000),
             # spec_1d
@@ -179,6 +239,7 @@ class CSVOutputSink(OutputSink):
         self._f_navi.write("datetime,lat,lon,spd,sog,cog,hdg\n")
 
     def send(self, result: ProcessResult):
+        _phys_clip(result.output)
         o = result.output
         dtime = datetime.now().strftime("%Y%m%dT%H%M%S")
         self._save_params(dtime, o.pulse, o.step, o.wave_sum, o.spec_1d)

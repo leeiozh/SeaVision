@@ -133,18 +133,19 @@ class UdpInputSource(InputSource):
                        rotation started → double_counter++).
           part1_seen — set on part_index=1 arrival; the true completion criterion.
 
-        Exit when part1_seen.all() (all lines fully received) or
+        Exit when n_ready >= n (all lines fully received) or
         double_counter >= max_duplicates (forced early exit: next frame started).
         """
         self.double_counter = 0
         n = self.curr_bck.bck.shape[0]
         ready_vec  = np.zeros(n, dtype=bool)  # p0 arrivals — duplicate detection
         part1_seen = np.zeros(n, dtype=bool)  # p1 arrivals — completion criterion
+        n_ready    = 0                         # counter avoids O(n) .all() each packet
         attempts   = 0
         start_time = time()
 
         while True:
-            if part1_seen.all():
+            if n_ready >= n:
                 break
             if self.double_counter >= max_duplicates:
                 break
@@ -163,15 +164,16 @@ class UdpInputSource(InputSource):
             try:
                 backpack = self.recv_back_once(timeout=recv_timeout)
                 self.proc_back_packet(backpack, ready_vec, max_duplicates)
-                if backpack.part_index == 1:
+                if backpack.part_index == 1 and not part1_seen[backpack.num_line]:
                     part1_seen[backpack.num_line] = True
+                    n_ready += 1
 
             except ProtocolError:
                 continue
             except TimeoutError:
                 continue
 
-        n_recv = int(np.sum(part1_seen))
+        n_recv = n_ready
         if n_recv < n:
             pct = 100.0 * n_recv / n
             print()

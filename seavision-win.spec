@@ -26,11 +26,11 @@ a = Analysis(
     datas=[],           # config.ini кладётся рядом с exe после установки
     hiddenimports=[
         'scipy.special.cython_special',
+        'scipy.fft',
         'scipy.signal',
+        'scipy.integrate',
         'scipy.ndimage',
-        'scipy.interpolate',
-        'netCDF4',
-        'cftime',
+        'scipy.optimize',
     ],
     hookspath=[],
     hooksconfig={},
