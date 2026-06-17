@@ -1,4 +1,5 @@
 import sys
+import ctypes
 from time import sleep
 from src.config import load_config
 from src.runtime.manager import Manager
@@ -6,6 +7,27 @@ from src.processing.processor import Processor
 from src.io.input import UdpInputSource, NCInputSource, BT8InputSource
 from src.io.output import UdpOutputSink, CSVOutputSink
 from src.runtime.logger import setup_logger
+
+
+def _disable_quick_edit():
+    """Disable Windows console Quick Edit Mode.
+
+    In Quick Edit Mode (default for cmd.exe) any mouse click or accidental
+    keypress pauses the process until Enter is pressed — fatal for unattended
+    production runs.  No-op on non-Windows platforms.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-10)          # STD_INPUT_HANDLE
+        mode = ctypes.c_ulong()
+        kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+        mode.value &= ~0x0040                        # clear ENABLE_QUICK_EDIT_MODE
+        mode.value |= 0x0080                         # set ENABLE_EXTENDED_FLAGS
+        kernel32.SetConsoleMode(handle, mode)
+    except Exception:
+        pass
 
 
 def _build_source(cfg):
@@ -60,6 +82,7 @@ def _build_sinks(cfg):
 
 
 def main():
+    _disable_quick_edit()
     log = setup_logger("main")
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.ini"
     cfg = load_config(config_path)
