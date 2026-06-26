@@ -1,3 +1,4 @@
+import copy
 from time import sleep, time
 from queue import Queue, Empty, Full
 from threading import Thread, Event, Lock
@@ -61,6 +62,8 @@ class Manager:
         self._reset_pending: bool = False
         self._proc_active_time: float = time()
         self._last_status_t: float = 0.0
+        self._last_output = None   # last good Output — resent in heartbeats so the
+                                   # receiver keeps its picture (only state/progress change)
 
         self.t_inp: Thread = None
         self.t_proc: Thread = None
@@ -114,23 +117,38 @@ class Manager:
 
     def _emit_status(self, algo_state: int, progress: float, *, force: bool = False,
                      pulse: int = 0, step: float = 0.0):
-        """Enqueue a lightweight status packet so UDP sinks emit a heartbeat.
+        """Enqueue a status heartbeat so UDP sinks keep sending during waiting,
+        accumulating, reset and error phases.
+
+        To avoid blanking the receiver, the heartbeat carries the *last good
+        result* (spectra and wave parameters) and only overrides the algo_state
+        and progress bytes.  Before the first result exists there is nothing to
+        show, so a zeroed status packet is sent instead.
 
         Throttled to one packet per _STATUS_INTERVAL unless force=True (used for
-        one-shot RESET/ERROR transitions).  Carries only algo_state/progress plus
-        basic frame descriptors; CSV sinks skip it (is_status=True).
+        one-shot RESET/ERROR transitions).  CSV sinks skip it (is_status=True).
         """
         now = time()
         if not force and (now - self._last_status_t) < _STATUS_INTERVAL:
             return
         self._last_status_t = now
-        rps = float(getattr(self.processor, "rpm", None) or self.cfg.const.RPM or 25)
-        out = Output.status(
-            algo_state=algo_state, progress=max(0, min(100, int(progress))),
-            n_freq=self.cfg.const.N_FREQ, n_dirs=self.cfg.const.N_DIRS,
-            n_freq_2d=self.cfg.const.N_FREQ_2D,
-            pulse=pulse, step=step, rps=rps,
-        )
+
+        progress = max(0, min(100, int(progress)))
+        last = self._last_output
+        if last is not None:
+            # Shallow copy: spectra/Wave refs are shared (sinks only read them,
+            # _phys_clip is idempotent); the two overridden ints are per-copy.
+            out = copy.copy(last)
+            out.algo_state = algo_state
+            out.progress = progress
+        else:
+            rps = float(getattr(self.processor, "rpm", None) or self.cfg.const.RPM or 25)
+            out = Output.status(
+                algo_state=algo_state, progress=progress,
+                n_freq=self.cfg.const.N_FREQ, n_dirs=self.cfg.const.N_DIRS,
+                n_freq_2d=self.cfg.const.N_FREQ_2D,
+                pulse=pulse, step=step, rps=rps,
+            )
         try:
             self.out_queue.put_nowait(ProcessResult(output=out, port=None, navi=None, is_status=True))
         except Full:
@@ -263,6 +281,7 @@ class Manager:
             _bar_active = False
             _frames_since_out = 0
             o = result["out"]
+            self._last_output = o   # cache for heartbeats (keep receiver's picture)
             curr_spd = getattr(o, 'curr_speed', 0.0)
             curr_dir = getattr(o, 'curr_dir',   0.0)
             print(

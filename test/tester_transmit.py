@@ -33,7 +33,7 @@ LINE_SLEEP = 0.00015   # 150 µs between lines; keeps send rate ~6.7k pkt/s < ke
 # To mimic real RPM: ROTATION_SLEEP = 60/RPM - AAP*LINE_SLEEP
 #   25 RPM → ROTATION_SLEEP ≈ 2.4 - 0.614 = 1.786 s
 #   30 RPM → ROTATION_SLEEP ≈ 2.0 - 0.614 = 1.386 s
-ROTATION_SLEEP = 0.3   # default fast mode for functional testing (≈ 65 RPM equivalent)
+ROTATION_SLEEP = 0.2   # default fast mode for functional testing (≈ 65 RPM equivalent)
 
 def _parse_args():
     p = argparse.ArgumentParser(description="SeaVision radar test transmitter")
