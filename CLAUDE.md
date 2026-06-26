@@ -202,7 +202,7 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 ### UDP пакет v2.0 — **1412 байт** (< 1472, без IP-фрагментации)
 
 ```
-"<BBHHHHHHHHHHHHHHHHHHHHBBHHHH{N_FREQ}B{N_FREQ_2D×N_DIRS}B"
+"<BBHHHHHHHHHHHHHHHHHHHHBBHBBBBBB{N_FREQ}B{N_FREQ_2D×N_DIRS}B"
  52 байта заголовок + 64 байта spec_1d + 36×36 байт spec_2d
 ```
 
@@ -224,12 +224,15 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 | [19] | H | curr_dir | °, КОМПАС |
 | [20] | H | wspd_x10 | м/с×10 |
 | [21] | H | wind_dir | °, математическая конвенция |
-| [22] | B | n_sys | 0–3 |
+| [22] | B | algo_state (байт 42) | 0=ожид,1=накопл,2=обраб/готово,3=сброс,4=ошибка |
 | [23] | B | quality | 0=BAD, 1=GOOD |
 | [24] | H | algo_version | `Constants.ALGO_VERSION`; инкрементировать при смене поведения алгоритма |
-| [25..27] | H×3 | reserved | =0 |
+| [25] | B | progress (байт 46) | 0–100 %; накопл=index/N_SHOTS·100, рабочий=кадры_с_расчёта/out_times·100 |
+| [26] | B×5 | reserved (байты 47–51) | =0 |
 | [28..91] | B×64 | spec_1d | [0–255] |
 | [92..] | B×1296 | spec_2d 36×36 | row-major: dir×freq |
+
+**Состояние алгоритма (`algo_state`, байт 42) и статус-пакеты:** `n_sys` удалён из протокола (число систем восстановимо из `Hs>0`). Manager шлёт лёгкие статус-пакеты (`ProcessResult.is_status=True`) в фазах ожидания/накопления через `_emit_status()` — все волновые параметры и спектры = 0, значимы только `algo_state`/`progress`. CSV-синк такие пакеты пропускает; UDP-синк шлёт. Реальный результат идёт с `algo_state=2, progress=100` (дефолты `Output`). `Output.status()` — фабрика статус-пакета.
 
 **Конвенции направлений:**
 - `dir_p/m_sum`, `dir_p_win/sw1/sw2`, `wind_dir` — **математическая**: 0°=Восток, CCW

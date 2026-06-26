@@ -1,10 +1,19 @@
 from time import sleep, time
 from queue import Queue, Empty, Full
 from threading import Thread, Event, Lock
-from src.io.structs import ProcessResult
+from src.io.structs import ProcessResult, Output
 from src.runtime.logger import setup_logger
 
 log = setup_logger("manager")
+
+# Algorithm-state codes emitted in the UDP packet (byte 42, see udp_protocol.docx).
+_STATE_WAIT  = 0   # waiting for data
+_STATE_ACCUM = 1   # accumulating the initial buffer
+_STATE_READY = 2   # operational / result ready
+_STATE_RESET = 3   # reset / restart
+_STATE_ERROR = 4   # error
+
+_STATUS_INTERVAL = 1.0   # min seconds between throttled status heartbeats
 
 
 def _drain(q: Queue):
@@ -51,6 +60,7 @@ class Manager:
         self._last_recv_time: float = 0.0
         self._reset_pending: bool = False
         self._proc_active_time: float = time()
+        self._last_status_t: float = 0.0
 
         self.t_inp: Thread = None
         self.t_proc: Thread = None
@@ -95,9 +105,36 @@ class Manager:
 
         print()  # end any in-progress \r progress bar before restart message
         log.warning(f"Restarting processor: {reason}")
+        self._emit_status(_STATE_RESET, 0, force=True)
         _drain(self.in_queue)
         sleep(0.1)
         self._start_processor()
+
+    # ── status heartbeats ─────────────────────────────────────────────────────
+
+    def _emit_status(self, algo_state: int, progress: float, *, force: bool = False,
+                     pulse: int = 0, step: float = 0.0):
+        """Enqueue a lightweight status packet so UDP sinks emit a heartbeat.
+
+        Throttled to one packet per _STATUS_INTERVAL unless force=True (used for
+        one-shot RESET/ERROR transitions).  Carries only algo_state/progress plus
+        basic frame descriptors; CSV sinks skip it (is_status=True).
+        """
+        now = time()
+        if not force and (now - self._last_status_t) < _STATUS_INTERVAL:
+            return
+        self._last_status_t = now
+        rps = float(getattr(self.processor, "rpm", None) or self.cfg.const.RPM or 25)
+        out = Output.status(
+            algo_state=algo_state, progress=max(0, min(100, int(progress))),
+            n_freq=self.cfg.const.N_FREQ, n_dirs=self.cfg.const.N_DIRS,
+            n_freq_2d=self.cfg.const.N_FREQ_2D,
+            pulse=pulse, step=step, rps=rps,
+        )
+        try:
+            self.out_queue.put_nowait(ProcessResult(output=out, port=None, navi=None, is_status=True))
+        except Full:
+            pass
 
     # ── input thread ──────────────────────────────────────────────────────────
 
@@ -139,6 +176,9 @@ class Manager:
         log.warning("Input thread stopped")
 
     def _on_no_data(self):
+        # Heartbeat so the external module shows "waiting for data" even before
+        # the first frame ever arrives or during a silence period.
+        self._emit_status(_STATE_WAIT, 0)
         if self._last_recv_time == 0.0:
             return  # no data has ever arrived, nothing to reset
         if not self._reset_pending and time() - self._last_recv_time > self._silence_threshold:
@@ -203,10 +243,19 @@ class Manager:
                 print()
                 _bar_active = False
                 log.exception("Processing error")
+                self._emit_status(_STATE_ERROR, 0, force=True)
                 self._restart_processor("processing exception")
                 return
 
             if result["out"] is None:
+                # No full result yet → emit a status heartbeat so the external
+                # module sees liveness and buffer-fill progress.
+                if _frames_in <= _n_shots:
+                    self._emit_status(_STATE_ACCUM, _frames_in / _n_shots * 100,
+                                      pulse=back.pulse, step=back.step)
+                else:
+                    self._emit_status(_STATE_READY, _frames_since_out / _out_times * 100,
+                                      pulse=back.pulse, step=back.step)
                 continue
 
             # ── result ready ──────────────────────────────────────────────────

@@ -40,15 +40,17 @@ _DEFAULT_RPM = 25.0   # initial guess until the first packet sets the real rate
 # [19] H  curr_dir
 # [20] H  wspd ×10
 # [21] H  wind_dir
-# [22] B  n_sys
+# [22] B  algo_state  (0=ожид 1=накопл 2=обраб/готово 3=сброс 4=ошибка)
 # [23] B  quality  (0=BAD, 1=GOOD)
 # [24] H  algo_version  (1 = текущая версия алгоритма)
-# [25-27] H×3  reserved
-_HDR_FMT  = "<BBHHHHHHHHHHHHHHHHHHHHBBHHHH"
+# [25] B  progress  (0–100 %)
+# [26-30] B×5  reserved
+_HDR_FMT  = "<BBHHHHHHHHHHHHHHHHHHHHBBHBBBBBB"
 _HDR_SIZE = struct.calcsize(_HDR_FMT)                     # 52 bytes
 _PKT_SIZE = _HDR_SIZE + N_FREQS + N_FREQ_2D * N_DIRS      # 52+64+1296 = 1412 bytes
 
 _PULSE = {1: "SP", 2: "MP", 3: "LP"}
+_STATE = {0: "ОЖИДАНИЕ", 1: "НАКОПЛЕНИЕ", 2: "ОБРАБОТКА", 3: "СБРОС", 4: "ОШИБКА"}
 
 _DIR_CFG = [
     ('dir_sum',  'tomato',      'Total'),
@@ -223,9 +225,12 @@ def _decode(data: bytes):
         'wspd':     un[20] / 10.0,
         'wind_dir': un[21],
         # misc
-        'ide_sys':      un[22],
+        'algo_state':   un[22],
         'quality':      un[23],
         'algo_version': un[24],
+        'progress':     un[25],
+        # n_sys восстанавливается из Hs>0 (поле n_sys удалено из протокола)
+        'n_sys':    sum(un[i] > 0 for i in (9, 12, 15)),
         # spectra
         'spec_1d':  spec_1d,
         'spec_2d':  spec_2d,
@@ -270,8 +275,9 @@ def _update(H, d: dict):
         f"  {'Wind:':<13}     {d['wspd']:5.2f} m/s  →  {d['wind_dir']:4}°\n"
         f"  {SEP}\n"
         f"  step: {d['step']:.3f} m   [{_PULSE.get(d['pulse'], '?')}]"
-        f"   RPM: {d['rpm']:.2f}   N_sys: {d['ide_sys']}\n"
-        f"  quality: {'GOOD ✓' if d['quality'] else 'BAD  ✗'}"
+        f"   RPM: {d['rpm']:.2f}   N_sys: {d['n_sys']}\n"
+        f"  state: {_STATE.get(d['algo_state'], '?')} {d['progress']:3d}%"
+        f"   quality: {'GOOD ✓' if d['quality'] else 'BAD  ✗'}"
     )
     H['info'].set_text(txt)
 
@@ -280,7 +286,7 @@ def _update(H, d: dict):
         f"   Tm={d['tm_sum']:.1f}s"
         f"   Curr={d['curr_spd']:.2f}m/s→{d['curr_dir']}°"
         f"   Wind={d['wspd']:.1f}m/s→{d['wind_dir']}°"
-        f"   RPM={d['rpm']:.2f}   N_sys={d['ide_sys']}   [{_PULSE.get(d['pulse'], '?')}]",
+        f"   RPM={d['rpm']:.2f}   N_sys={d['n_sys']}   [{_PULSE.get(d['pulse'], '?')}]",
         fontsize=10,
     )
 
@@ -305,6 +311,6 @@ if __name__ == '__main__':
         print(
             f"Hs={d['swh_sum']:.2f}m  Tp={d['per_sum']:.1f}s  Tm={d['tm_sum']:.1f}s"
             f"  Dir={d['dir_sum']}°  Curr={d['curr_spd']:.2f}m/s"
-            f"  Wind={d['wspd']:.1f}m/s  Nsys={d['ide_sys']}"
+            f"  Wind={d['wspd']:.1f}m/s  Nsys={d['n_sys']}"
             f"  RPM={d['rpm']:.2f}  [{_PULSE.get(d['pulse'], '?')}]"
         )

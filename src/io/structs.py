@@ -237,12 +237,20 @@ class Output:
       curr_dir   — true ocean current direction [°], compass convention.
       wspd       — wind speed estimate [m/s].
       wind_dir   — wind direction [°], math convention.
+
+    Status fields (UDP protocol v2.0):
+      algo_state — current processing stage for an external display module
+                   (no console access): 0=waiting for data, 1=accumulating buffer,
+                   2=processing/result ready, 3=reset/restart, 4=error.
+      progress   — completion percent [0–100]: while accumulating the initial
+                   buffer = index/N_SHOTS·100; in steady operation = frames since
+                   last computation / out_times · 100.
     """
 
     def __init__(self, pulse: int, step: float, rps: float, n_in_win: float, n_wins: float, step_area: float,
                  n_area: float, n_start: float, cog_proc: float, sog_proc: float, max_sys: int, ide_sys: int,
                  wave_sum: Wave, wave_win: Wave, wave_sw1: Wave, wave_sw2: Wave, n_dis: int, spec_1d: np.ndarray,
-                 spec_2d: np.ndarray):
+                 spec_2d: np.ndarray, algo_state: int = 2, progress: int = 100):
         self.pulse = pulse
         self.step = step
         self.rps = rps
@@ -262,6 +270,29 @@ class Output:
         self.n_dis = n_dis
         self.spec_1d = spec_1d
         self.spec_2d = spec_2d
+        self.algo_state = algo_state
+        self.progress = progress
+
+    @classmethod
+    def status(cls, algo_state: int, progress: int, n_freq: int, n_dirs: int, n_freq_2d: int,
+               pulse: int = 0, step: float = 0.0, rps: float = 0.0) -> "Output":
+        """Build a lightweight status packet carrying only state/progress.
+
+        All wave parameters and spectra are zero; only algo_state, progress and
+        the basic frame descriptors (pulse/step/rps) are meaningful.  Emitted by
+        the Manager as a heartbeat during waiting/accumulating phases so an
+        external module can show current activity without console access.
+        """
+        return cls(
+            pulse=pulse, step=step, rps=rps,
+            n_in_win=0, n_wins=0, step_area=step, n_area=0, n_start=0,
+            cog_proc=0, sog_proc=0, max_sys=3, ide_sys=0,
+            wave_sum=Wave(), wave_win=Wave(), wave_sw1=Wave(), wave_sw2=Wave(),
+            n_dis=0,
+            spec_1d=np.zeros(n_freq, dtype=int),
+            spec_2d=np.zeros((n_dirs, n_freq_2d), dtype=int),
+            algo_state=algo_state, progress=int(progress),
+        )
 
 
 class WaveOutput:
@@ -293,9 +324,10 @@ class WaveOutput:
 
 class ProcessResult:
     """Single completed processing result passed from processor to output sinks."""
-    __slots__ = ("output", "port", "navi")
+    __slots__ = ("output", "port", "navi", "is_status")
 
-    def __init__(self, output: "Output", port: np.ndarray, navi: "Navi"):
+    def __init__(self, output: "Output", port: np.ndarray, navi: "Navi", is_status: bool = False):
         self.output = output
         self.port = port
         self.navi = navi
+        self.is_status = is_status   # True = heartbeat/status packet (UDP only, skip CSV)

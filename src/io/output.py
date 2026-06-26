@@ -132,9 +132,10 @@ class UdpOutputSink(OutputSink):
         #   HHHHH                   — summary: swh, t_p, t_m, dir_p, dir_m
         #   HHH HHH HHH             — wind/sw1/sw2: swh, t_p, dir_p each
         #   H H HH                  — curr_speed, curr_dir, wspd_x10, wind_dir
-        #   BB HHHH                 — n_sys, quality, algo_version, reserved×3
+        #   BB H                    — algo_state(42), quality(43), algo_version(44-45)
+        #   B 5B                    — progress(46), reserved×5 (47-51)
         data = pack(
-            f"<BBHHHHHHHHHHHHHHHHHHHHBBHHHH"
+            f"<BBHHHHHHHHHHHHHHHHHHHHBBHBBBBBB"
             f"{self.n_freqs}B{self.n_freq_2d * self.n_dirs}B",
             5, int(np.clip(o.pulse, 0, 255)),
             _u16(o.step * 1000), _u16(o.rps * 100),
@@ -149,8 +150,11 @@ class UdpOutputSink(OutputSink):
             _u16(o.wave_sw2.swh * 100), _u16(o.wave_sw2.t_p * 100), _dir(o.wave_sw2.d_p),
             _u16(getattr(o, 'curr_speed', 0.0) * 100), _dir(getattr(o, 'curr_dir', 0.0)),
             _u16(getattr(o, 'wspd', 0.0) * 10), _dir(getattr(o, 'wind_dir', 0.0)),
-            o.ide_sys, o.n_dis,
-            self.algo_version, 0, 0, 0,
+            # algo_state (byte 42, replaces n_sys), quality (43), version (44-45)
+            int(np.clip(getattr(o, 'algo_state', 2), 0, 255)), o.n_dis,
+            self.algo_version,
+            # progress (byte 46), reserved ×5 (47-51)
+            int(np.clip(getattr(o, 'progress', 100), 0, 100)), 0, 0, 0, 0, 0,
             *o.spec_1d,
             *o.spec_2d.flatten(),
         )
@@ -239,6 +243,8 @@ class CSVOutputSink(OutputSink):
         self._f_navi.write("datetime,lat,lon,spd,sog,cog,hdg\n")
 
     def send(self, result: ProcessResult):
+        if getattr(result, "is_status", False):
+            return  # heartbeat/status packet — UDP only, nothing to log to CSV
         _phys_clip(result.output)
         o = result.output
         dtime = datetime.now().strftime("%Y%m%dT%H%M%S")

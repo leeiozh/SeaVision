@@ -43,14 +43,39 @@ from src.algorithms.dispersion import calc_current_vector, calc_current_multiwav
 from src.algorithms.partition import (calc_wspd, calc_partitions,
                                        find_freq_peaks, find_system_dirs)
 from src.runtime.logger import setup_logger
+import dataclasses
+from scipy.integrate import trapezoid
 
-_SIGNAL_BAND  = 10    # must match processor.py
-_MAX_CURRENT  = 3.0   # physical clip for ocean current [m/s]
+
+def _shape_features(s_omega, omega_vals):
+    """Дескрипторы формы 1-D спектра (как в process_final/sweep). Все масштаб-инвариантны.
+    peakedness max/mean — главный предиктор Hs здесь; qp Goda 1970; nu Longuet-Higgins 1975."""
+    spos = s_omega[s_omega > 0]
+    if spos.size < 3 or s_omega.max() <= 0:
+        return dict(peakedness=0.0, peak_prom=0.0, qp=0.0, nu=0.0)
+    peakedness = float(s_omega.max() / spos.mean())
+    occ = s_omega[s_omega > 0.05 * s_omega.max()]
+    peak_prom = float(s_omega.max() / np.median(occ)) if occ.size else 0.0
+    f = omega_vals / (2 * np.pi)
+    m0 = float(trapezoid(s_omega, f)); m1 = float(trapezoid(s_omega * f, f))
+    m2 = float(trapezoid(s_omega * f * f, f))
+    qp = float(2.0 * trapezoid(f * s_omega ** 2, f) / m0 ** 2) if m0 > 0 else 0.0
+    nu = float(np.sqrt(max(m0 * m2 / m1 ** 2 - 1.0, 0.0))) if m1 > 0 else 0.0
+    return dict(peakedness=peakedness, peak_prom=peak_prom, qp=qp, nu=nu)
+
+# ── улучшенный алгоритм (ит.4, откалибровано по альтиметрии) ──────────────────
+# Геометрия/полоса/MTF зафиксированы; ADP=1200 переопределяет конфиг в main().
+_ADP_FIX      = 1200  # ADP сегментов (override config)
+_SIGNAL_BAND  = 14    # band — полуширина дисперсионной полосы [k-бины]
+_MTF_PRE      = 1.2   # MTF в пред-анализе тока (как в processor)
+_MTF_FINAL    = 1.4   # MTF на ФИНАЛЬНОМ спектре (Hs/период/направление)
+_MAX_CURRENT  = 3.0   # клип остаточного тока [m/s] — применяется ДО Doppler (clip3.0)
 
 # Quality thresholds — algorithm version constants, same as processor.py
 # WIND_SIG_MIN is installation-dependent and read from cst.WIND_SIG_MIN
 _SNR_QUALITY_MIN = 5.0
 _T_PEAK_MIN      = 5.5
+_T_PEAK_MAX      = 30.0   # верхняя граница T_peak для quality (отсечь bin-1 артефакт)
 
 _F_DISPLAY   = 0.20   # Hz — radial limit on polar spectrum display
 _BUOY_SKIP_SEC = 420   # skip first 7 min of buoy data (deployment transit)
@@ -61,7 +86,8 @@ _SYS_COLORS = ['cyan', 'lime', 'orange']
 
 
 _PARAMS_FIELDS = [
-    "name", "seg_idx", "pulse", "quality",
+    "name", "seg_idx", "pulse", "quality", "snr_tot",
+    "swh_snr", "peakedness", "peak_prom", "qp", "nu", "m0", "sqrt_m0",
     "swh", "t_p", "t_m", "d_p", "d_m",
     "wswh", "wt_p", "wt_m", "wd_p",
     "sw1_swh", "sw1_t_p", "sw1_d_p",
@@ -843,7 +869,7 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         spec_3d_ship   = apply_doppler_3d_vec(spec_3d_corr, k_max, Ux_ship, Uy_ship, om_max)
         port_pre, _    = calc_port(spec_3d_ship)
         signal_pre, _  = separate_signal_noise(port_pre, k_vals, om_max, band=_SIGNAL_BAND)
-        sig_mtf_pre    = apply_mtf(signal_pre, k_vals, exp=1.2)
+        sig_mtf_pre    = apply_mtf(signal_pre, k_vals, exp=_MTF_PRE)
         s_omega_pre, _, _, _ = compute_frequency_spectrum(sig_mtf_pre, k_vals, omega_vals)
 
         freq_peaks = find_freq_peaks(s_omega_pre, omega_vals)
@@ -869,18 +895,30 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
                                          sog=sog_mean, cog_deg=cog_mean)
             sys_scatter = [(np.array([]), np.array([]), np.array([])) for _ in systems_draft]
 
+        # Клип остаточного тока к _MAX_CURRENT ДО Doppler (режим clip3.0, как в
+        # process_final). На быстром транзите residual=U−U_ship рейлит; без клипа
+        # перед коррекцией размазанный сдвиг искажал бы дисперсионную оболочку.
+        Ux_ship = sog_mean * np.sin(cog_rad); Uy_ship = sog_mean * np.cos(cog_rad)
+        _rx, _ry = float(Ux) - Ux_ship, float(Uy) - Uy_ship
+        _res = float(np.hypot(_rx, _ry))
+        if _res > _MAX_CURRENT and _res > 0:
+            _f = _MAX_CURRENT / _res; _rx *= _f; _ry *= _f
+        Ux, Uy = Ux_ship + _rx, Uy_ship + _ry
+
         spec_3d_fixed = apply_doppler_3d_vec(spec_3d_corr, k_max, Ux, Uy, om_max)
 
         port_fixed, _ = calc_port(spec_3d_fixed)
         signal, noise = separate_signal_noise(port_fixed, k_vals, om_max, band=_SIGNAL_BAND)
-        signal_mtf    = apply_mtf(signal, k_vals, exp=1.2)
+        signal_mtf    = apply_mtf(signal, k_vals, exp=_MTF_FINAL)
 
         snr_tot                         = compute_snr(signal_mtf, noise)
         s_omega, m0, T_peak, T_mean     = compute_frequency_spectrum(signal_mtf, k_vals, omega_vals)
         s_om_th, peak_dir, mean_dir     = calc_spec2d(
             spec_3d_fixed, omega_vals, k_max, cst.N_DIRS, band=_SIGNAL_BAND)
 
-        swh = 0.01 * (cst.SNR_A + cst.SNR_B * np.sqrt(snr_tot))
+        swh = 0.01 * (cst.SNR_A + cst.SNR_B * np.sqrt(snr_tot))   # production √SNR (насыщается)
+        shape = _shape_features(s_omega, omega_vals)              # для калибровки Hs по бую
+        sqrt_m0 = float(np.sqrt(max(m0, 0.0)))
         sys = calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh)
 
         cog_rad  = np.deg2rad(cog_mean)
@@ -922,14 +960,15 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         quality = int(
             snr_tot    >= _SNR_QUALITY_MIN
             and wind_sig   >= cst.WIND_SIG_MIN
-            and T_peak     >= _T_PEAK_MIN
+            and _T_PEAK_MIN <= T_peak <= _T_PEAK_MAX
             and sys["n_sys"] >= 1
         )
         if not quality:
             reasons = []
             if snr_tot       < _SNR_QUALITY_MIN: reasons.append(f'snr={snr_tot:.2f}<{_SNR_QUALITY_MIN}')
             if wind_sig      < cst.WIND_SIG_MIN: reasons.append(f'ring_sig={wind_sig:.2f}<{cst.WIND_SIG_MIN}')
-            if T_peak        < _T_PEAK_MIN:      reasons.append(f'T_peak={T_peak:.2f}<{_T_PEAK_MIN}')
+            if not (_T_PEAK_MIN <= T_peak <= _T_PEAK_MAX):
+                reasons.append(f'T_peak={T_peak:.2f}∉[{_T_PEAK_MIN},{_T_PEAK_MAX}]')
             if sys["n_sys"]  < 1:                reasons.append('n_sys=0')
             msg = f'[quality] {name}: BAD  [{", ".join(reasons)}]'
             log.info(msg)
@@ -993,6 +1032,14 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
         'name':     name,
         'pulse':    _pulse_str(pulse),
         'quality':  int(quality),
+        'snr_tot':  float(snr_tot),
+        'swh_snr':  float(swh),
+        'peakedness': float(shape['peakedness']),
+        'peak_prom':  float(shape['peak_prom']),
+        'qp':         float(shape['qp']),
+        'nu':         float(shape['nu']),
+        'm0':         float(m0),
+        'sqrt_m0':    float(sqrt_m0),
         'swh':      float(swh),
         't_p':      float(T_peak),
         't_m':      float(T_mean),
@@ -1050,6 +1097,11 @@ def main():
 
     log = setup_logger('batch')
     cfg = load_config(args.config)
+    # Зашиваем улучшенную геометрию: ADP=1200 (band/MTF/clip — в константах выше).
+    # AppConfig заморожен → пересоздаём весь cfg с новым const.
+    cfg = dataclasses.replace(cfg, const=dataclasses.replace(cfg.const, ADP=_ADP_FIX))
+    log.info(f'АЛГОРИТМ ит.4: ADP={cfg.const.ADP} band={_SIGNAL_BAND} '
+             f'MTF_fin={_MTF_FINAL} clip={_MAX_CURRENT} (clip ДО Doppler)')
 
     params_path = os.path.join(args.out, 'params.csv')
     os.makedirs(args.out, exist_ok=True)
