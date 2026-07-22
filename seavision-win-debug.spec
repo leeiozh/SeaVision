@@ -1,10 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
-# Debug-сборка: то же, что seavision-win.spec, но С matplotlib.
-# Нужна, чтобы режим pics=<путь> (сохранение debug_combined.png) не падал
-# из-за отсутствия matplotlib. Процессор рисует через Agg-backend
-# (Figure + FigureCanvasAgg, без pyplot и без GUI), поэтому GUI-бэкенды
-# по-прежнему исключены — тянем только сам matplotlib + Agg.
+# Debug-сборка: то же, что seavision-win.spec, но С matplotlib (Agg-backend,
+# savefig в PNG, без GUI) — чтобы режим pics=<путь> не падал на импорте.
+# Та же единая линия Windows 7…11: Python 3.8 + PyInstaller 5.13.2
+# (обоснование версии — в шапке seavision-win.spec).
 
 excludes = [
     # GUI backends — не нужны (рисуем в Agg → PNG)
@@ -46,7 +45,6 @@ a = Analysis(
     runtime_hooks=[],
     excludes=excludes,
     noarchive=False,
-    optimize=1,
 )
 pyz = PYZ(a.pure)
 

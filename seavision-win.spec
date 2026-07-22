@@ -1,4 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
+#
+# ЕДИНАЯ штатная сборка для Windows 7 / 8.1 / 10 / 11 (БЕЗ matplotlib).
+#
+# Собирается на Python 3.8 + PyInstaller 5.13.2. Это «нижняя» точка, совместимая
+# вверх: бинарники 3.8 запускаются на всех Windows от 7 до 11, тогда как сборка
+# на 3.9+ на семёрке не стартует (Python 3.9+ импортирует из kernel32 функции,
+# которых там нет: PssQuerySnapshot — Win8.1+, api-ms-win-core-path — Win10+;
+# path-API лечится шимом, а PssQuerySnapshot — прямой импорт из KnownDLL и
+# локально не подменяется). Поэтому единая сборка возможна только на 3.8.
+#
+# Следствия версии: PyInstaller 5 не знает параметра Analysis(optimize=...)
+# (появился в 6), numpy/scipy закреплены последними cp38-колёсами
+# (см. requirements-win.txt). Шим api-ms-win-core-path здесь НЕ нужен.
 
 excludes = [
     # GUI backends — не нужны
@@ -39,7 +52,6 @@ a = Analysis(
     runtime_hooks=[],
     excludes=excludes,
     noarchive=False,
-    optimize=1,
 )
 pyz = PYZ(a.pure)
 

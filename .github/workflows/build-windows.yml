@@ -6,82 +6,23 @@ on:
     tags:
       - 'v*'
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ЕДИНАЯ сборка для Windows 7 / 8.1 / 10 / 11.
+#
+# Раньше линий было две (Python 3.12 для Win10/11 + Python 3.8 для Win7) —
+# четыре артефакта, и легко было увезти на объект не тот. Теперь одна:
+# бинарники Python 3.8 совместимы вверх и запускаются на всех Windows от 7 до 11,
+# тогда как сборка на 3.9+ на семёрке не стартует в принципе (PssQuerySnapshot —
+# прямой импорт из kernel32, KnownDLL, шимом не подменяется). Поэтому пока Win7
+# в списке целевых систем, единая сборка возможна только на 3.8 + PyInstaller 5.
+#
+# Артефакта два — по назначению, не по ОС:
+#   seavision-windows-x64        — штатная, БЕЗ matplotlib (pics=false)
+#   seavision-windows-x64-debug  — С matplotlib (pics=<путь>, debug-картинки)
+# ─────────────────────────────────────────────────────────────────────────────
+
 jobs:
   build:
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          architecture: 'x64'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-win-debug.txt
-          pip install pyinstaller
-
-      - name: Build EXE (no matplotlib)
-        run: pyinstaller seavision-win.spec --distpath dist --workpath build
-
-      - name: Build EXE (debug, with matplotlib)
-        run: pyinstaller seavision-win-debug.spec --distpath dist-debug --workpath build-debug
-
-      # Windows 7/8/8.1 не содержат API-set "Path" (api-ms-win-core-path-l1-1-0.dll),
-      # появившийся только в Windows 10. Python 3.9+ линкуется с ним при старте,
-      # поэтому на Win7 бандл падает с "отсутствует api-ms-win-core-path-l1-1-0.dll".
-      # Кладём рядом с exe open-source шим (PathCch* → легаси Shlwapi), это снимает
-      # зависимость и на Win10+ не мешает (системная DLL имеет приоритет загрузки).
-      - name: Add Windows 7 path-API shim
-        shell: pwsh
-        env:
-          SHIM_VERSION: '0.3.1'
-        run: |
-          $url = "https://github.com/nalexandru/api-ms-win-core-path-HACK/releases/download/$env:SHIM_VERSION/api-ms-win-core-path-blender-$env:SHIM_VERSION.zip"
-          Write-Host "Downloading $url"
-          Invoke-WebRequest -Uri $url -OutFile shim.zip
-          Expand-Archive -Path shim.zip -DestinationPath shim -Force
-          # внутри архива x64- и x86-варианты лежат в разных подпапках; берём 64-битный
-          $dll = Get-ChildItem -Path shim -Recurse -Filter 'api-ms-win-core-path-l1-1-0.dll' |
-                 Where-Object { $_.FullName -match '(?i)(x64|amd64|win64|\\64\\)' } |
-                 Select-Object -First 1
-          if (-not $dll) {
-            $all = Get-ChildItem -Path shim -Recurse -Filter 'api-ms-win-core-path-l1-1-0.dll'
-            Write-Error "x64 shim DLL not found. Archive contents: $($all.FullName -join ', ')"
-            exit 1
-          }
-          Write-Host "Using shim: $($dll.FullName)"
-          Copy-Item $dll.FullName 'dist/seavision/api-ms-win-core-path-l1-1-0.dll' -Force
-          Copy-Item $dll.FullName 'dist-debug/seavision/api-ms-win-core-path-l1-1-0.dll' -Force
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: seavision-windows-x64
-          path: dist/seavision/             # штатная сборка: exe + dll, без matplotlib
-          retention-days: 30
-
-      - name: Upload artifact (debug)
-        uses: actions/upload-artifact@v4
-        with:
-          name: seavision-windows-x64-debug
-          path: dist-debug/seavision/       # debug-сборка с matplotlib (pics=<путь>)
-          retention-days: 30
-
-  # ───────────────────────────────────────────────────────────────────────────
-  # Отдельная Win7-совместимая линия.
-  # Python 3.12 импортирует из kernel32 функции, которых нет в Windows 7
-  # (PssQuerySnapshot — Win8.1+; api-ms-win-core-path — Win10+). Шим лечит только
-  # path-API, а PssQuerySnapshot — прямой импорт из kernel32 (KnownDLL, локально
-  # не подменяется). Поэтому для Win7 собираем на Python 3.8 — последнем CPython
-  # с офиц. поддержкой семёрки — с пинами numpy/scipy под cp38 и PyInstaller 5.x
-  # (его бутлоадер ещё запускается на Win7). Шим path-API здесь НЕ нужен.
-  build-win7:
     runs-on: windows-latest
 
     steps:
@@ -94,28 +35,72 @@ jobs:
           python-version: '3.8'
           architecture: 'x64'
 
-      - name: Install dependencies (Win7 pins)
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-win7-debug.txt
+          pip install -r requirements-win-debug.txt
           pip install "pyinstaller==5.13.2"
 
-      - name: Build EXE (Win7, no matplotlib)
-        run: pyinstaller seavision-win7.spec --distpath dist-win7 --workpath build-win7
+      - name: Build EXE (no matplotlib)
+        run: pyinstaller seavision-win.spec --distpath dist --workpath build
 
-      - name: Build EXE (Win7, debug, with matplotlib)
-        run: pyinstaller seavision-win7-debug.spec --distpath dist-win7-debug --workpath build-win7-debug
+      - name: Build EXE (debug, with matplotlib)
+        run: pyinstaller seavision-win-debug.spec --distpath dist-debug --workpath build-debug
 
-      - name: Upload artifact (Win7)
+      # Дым-тест на самом раннере (ядро Win10/11): бандл должен реально стартовать,
+      # а не только собраться. config.ini слушает 127.0.0.1, радар не нужен —
+      # процессор уходит в состояние «ожидание данных» и продолжает жить.
+      # Ловит именно тот класс поломок, который не виден на этапе сборки:
+      # несовместимые DLL, битые импорты numpy/scipy, падение на старте.
+      - name: Smoke test (Win10/11 kernel)
+        shell: pwsh
+        run: |
+          foreach ($d in 'dist', 'dist-debug') {
+            Write-Host "=== smoke: $d ==="
+            Copy-Item config.ini "$d/seavision/config.ini" -Force
+            $log = "$d-smoke.log"
+            $err = "$d-smoke.err"
+            $p = Start-Process -FilePath "$d/seavision/seavision.exe" `
+                               -WorkingDirectory "$d/seavision" `
+                               -RedirectStandardOutput $log `
+                               -RedirectStandardError $err `
+                               -PassThru -NoNewWindow
+            Start-Sleep -Seconds 25
+            $exited = $p.HasExited
+            if (-not $exited) { Stop-Process -Id $p.Id -Force }
+            $out = (Get-Content $log -Raw -ErrorAction SilentlyContinue) + `
+                   (Get-Content $err -Raw -ErrorAction SilentlyContinue)
+            Write-Host $out
+            if ($exited) {
+              Write-Error "$d : процесс завершился с кодом $($p.ExitCode), ожидалась работа"
+              exit 1
+            }
+            if ($out -notmatch 'Manager started') {
+              Write-Error "$d : в выводе нет 'Manager started'"
+              exit 1
+            }
+            Write-Host "$d : OK — стартовал и жив через 25 с"
+          }
+
+      # Диагностика: какие системные DLL уехали в бандл. Полезно при разборе
+      # «на одной машине работает, на другой нет» — сверять состав UCRT.
+      - name: List bundled system DLLs
+        shell: pwsh
+        run: |
+          Get-ChildItem dist/seavision -Filter '*.dll' |
+            Where-Object { $_.Name -match '(?i)^(api-ms-|ucrtbase|vcruntime|msvcp|concrt)' } |
+            Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: seavision-windows-x64-win7
-          path: dist-win7/seavision/        # Win7-совместимая сборка (Python 3.8), без matplotlib
+          name: seavision-windows-x64
+          path: dist/seavision/             # штатная сборка, без matplotlib
           retention-days: 30
 
-      - name: Upload artifact (Win7 debug)
+      - name: Upload artifact (debug)
         uses: actions/upload-artifact@v4
         with:
-          name: seavision-windows-x64-win7-debug
-          path: dist-win7-debug/seavision/  # Win7 debug-сборка с matplotlib (pics=<путь>)
+          name: seavision-windows-x64-debug
+          path: dist-debug/seavision/       # debug-сборка с matplotlib (pics=<путь>)
           retention-days: 30

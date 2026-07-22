@@ -1,2 +1,6 @@
-numpy>=2.0
-scipy>=1.17
+# Единая Windows-линия (Win7…Win11), штатная сборка — БЕЗ matplotlib (pics=false).
+# Потолок версий задаёт Python 3.8: последний CPython, чьи бинарники стартуют на
+# Windows 7 (обоснование — в шапке seavision-win.spec). Здесь — последние версии
+# с cp38 win_amd64 колёсами.
+numpy==1.24.4
+scipy==1.10.1

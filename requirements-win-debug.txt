@@ -1,5 +1,7 @@
-numpy>=2.0
-scipy>=1.17
-netCDF4>=1.7
-cftime>=1.6
-matplotlib>=3.8
+# Единая Windows-линия (Win7…Win11), debug-сборка: то же, что requirements-win.txt,
+# плюс netCDF4 (type=nc) и matplotlib (pics=<путь>) — последние версии с cp38-колёсами.
+numpy==1.24.4
+scipy==1.10.1
+netCDF4==1.6.5
+cftime==1.6.3
+matplotlib==3.7.5
