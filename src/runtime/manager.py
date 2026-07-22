@@ -3,6 +3,7 @@ from time import sleep, time
 from queue import Queue, Empty, Full
 from threading import Thread, Event, Lock
 from src.io.structs import ProcessResult, Output
+from src.io.service import SocketTimeout
 from src.runtime.logger import setup_logger
 
 log = setup_logger("manager")
@@ -55,6 +56,7 @@ class Manager:
 
         # RPM may be None (estimated live) — use 25 only for these coarse timeouts.
         rot_period = 60.0 / (config.const.RPM or 25)
+        self._rot_period = rot_period
         self._silence_threshold = config.const.N_SHOTS * rot_period
         self._watchdog_timeout = 10.0 * rot_period
 
@@ -62,6 +64,8 @@ class Manager:
         self._reset_pending: bool = False
         self._proc_active_time: float = time()
         self._last_status_t: float = 0.0
+        self._last_calc_s: float = 0.0   # duration of the last spectral pass —
+                                         # sets the queue depth the input needs
         self._last_output = None   # last good Output — resent in heartbeats so the
                                    # receiver keeps its picture (only state/progress change)
 
@@ -161,7 +165,9 @@ class Manager:
         while not self.stop_ev.is_set():
             try:
                 back = self.inp.get_bck()
-            except TimeoutError:
+            except SocketTimeout:
+                # Normal idle path: no radar data yet. Must stay silent — see
+                # SocketTimeout on why a bare `except TimeoutError` is not enough.
                 self._on_no_data()
                 continue
             except Exception:
@@ -189,7 +195,17 @@ class Manager:
             try:
                 self.in_queue.put_nowait((back, navi))
             except Full:
-                log.warning("Input queue full — frame dropped")
+                # The process thread is busy with the spectral pass while frames
+                # keep arriving once per rotation.  The queue must be deep enough
+                # to cover that pass, otherwise rotations are lost and the wave
+                # time series gets a gap.  Report the depth actually needed.
+                need = int(self._last_calc_s / self._rot_period) + 2
+                log.warning(
+                    f"Input queue full — frame dropped "
+                    f"(last spectral pass {self._last_calc_s:.1f}s ≈ "
+                    f"{self._last_calc_s / self._rot_period:.1f} rotations; "
+                    f"queue_size={self.cfg.pipeline.queue_size}, need ≥{need})"
+                )
 
         log.warning("Input thread stopped")
 
@@ -255,8 +271,10 @@ class Manager:
             _bar_active = True
 
             try:
+                _t0 = time()
                 result = self.processor.update(back, navi)
                 self._proc_active_time = time()
+                _dt = self._proc_active_time - _t0
             except Exception:
                 print()
                 _bar_active = False
@@ -282,18 +300,19 @@ class Manager:
             _frames_since_out = 0
             o = result["out"]
             self._last_output = o   # cache for heartbeats (keep receiver's picture)
+            self._last_calc_s = _dt  # this update() ran the spectral pass
             curr_spd = getattr(o, 'curr_speed', 0.0)
             curr_dir = getattr(o, 'curr_dir',   0.0)
             print(
                 f'  → Hs={o.wave_sum.swh:.2f}m  Tp={o.wave_sum.t_p:.1f}s  '
                 f'Dp={o.wave_sum.d_p:.0f}°  Nsys={o.ide_sys}  '
                 f'Curr={curr_spd:.2f}m/s@{curr_dir:.0f}°  '
-                f'{"GOOD" if o.n_dis else "BAD"}'
+                f'{"GOOD" if o.n_dis else "BAD"}  calc={_dt:.1f}s'
             )
             log.info(
                 f"Hs={o.wave_sum.swh:.2f}m  Tp={o.wave_sum.t_p:.1f}s  "
                 f"Dp={o.wave_sum.d_p:.0f}°  Curr={curr_spd:.2f}m/s  "
-                f"Nsys={o.ide_sys}"
+                f"Nsys={o.ide_sys}  calc={_dt:.1f}s"
             )
 
             proc_result = ProcessResult(
@@ -304,7 +323,14 @@ class Manager:
             try:
                 self.out_queue.put_nowait(proc_result)
             except Full:
-                log.warning("Output queue full — result dropped")
+                # A real result must never be displaced by heartbeats, which share
+                # this queue: drop the oldest entry (almost always a stale status
+                # packet) and retry once.
+                try:
+                    self.out_queue.get_nowait()
+                    self.out_queue.put_nowait(proc_result)
+                except (Empty, Full):
+                    log.warning("Output queue full — result dropped")
 
         # Clean up any pending \r progress bar when this thread exits
         if _bar_active:

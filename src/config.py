@@ -80,7 +80,8 @@ def load_config(path: str) -> AppConfig:
     )
 
     pipeline = PipelineConfig(
-        queue_size      = cfg.getint    ("pipeline", "queue_size",       fallback=4),
+        # 16 frames ≈ 135 MB — must outlast the longest spectral pass (see config.ini)
+        queue_size      = cfg.getint    ("pipeline", "queue_size",       fallback=16),
         restart_on_error= cfg.getboolean("pipeline", "restart_on_error", fallback=True),
     )
 

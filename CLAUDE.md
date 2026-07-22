@@ -63,7 +63,12 @@ python buoy/analyze.py [--csv buoy/params.csv] [--spec buoy/spec] [--out buoy/fi
 
 ```
 
-Нет системы тестов и линтера — тестирование через `tester_receive.py` с живыми данными или файлами.
+Автономные тесты (без радара и сокетов), они же гоняются в CI на Python 3.8:
+```bash
+python test/test_idle_no_error.py       # простой без данных — молча
+python test/test_error_heartbeat.py     # ошибка обработки — пакеты идут, картинка держится
+```
+Линтера нет; интеграционное тестирование — через `tester_receive.py` с живыми данными или файлами.
 
 `test/tester_receive.py` и `test/tester_transmit.py` — канонические.
 
@@ -94,6 +99,10 @@ test/tester_receive.py      ← визуализация
 | Processing exception | немедленный `_restart_processor()` |
 | Processor hang > `10 × rot_period` | watchdog → `_restart_processor()` |
 | Output sink error | логируется per-sink, остальные sinks продолжают работу |
+
+**Таймауты сокета — ловить ТОЛЬКО `SocketTimeout`** (`src/io/service.py`), а не голый `except TimeoutError`. В Python 3.10+ `socket.timeout` — это и есть `TimeoutError`, но в 3.8/3.9 это разные классы (оба от `OSError`). Windows-бандл собирается на 3.8, поэтому голый `except TimeoutError` там не срабатывает и штатный простой без данных превращается в трейсбек `Input error`. Регрессия закрыта тестом `test/test_idle_no_error.py` (структурная проверка + функциональная).
+
+**Очереди (`[pipeline] queue_size`, default 16).** Одно значение задаёт глубину и `in_queue`, и `out_queue`. Входная должна перекрывать самый долгий расчёт спектра: кадры идут раз в оборот (~2.4 с при RPM=25), и если слотов не хватает — обороты теряются, во временном ряде появляется дыра. Слот стоит ~8.5 МБ (кадр 4096×2048 uint8) → 16 ≈ 135 МБ. При переполнении warning печатает длительность последнего расчёта и требуемую глубину; в строке результата есть `calc=Xs`. Реальный результат при полной `out_queue` вытесняет самый старый пакет (почти всегда протухший heartbeat) — статус-пакеты не должны терять результаты.
 
 ## Источники входных данных
 
@@ -309,6 +318,8 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 | `test/tester_receive.py` | Визуализация UDP v2.0 (1412 байт): 1D спектр + полярный спектр + таблица |
 | `test/tester_receive_old.py` | Визуализация **старого** протокола (1398 байт, `sv_protocol_2204.docx`) |
 | `test/tester_transmit.py` | Генератор тестового потока |
+| `test/test_idle_no_error.py` | Простой без данных молчит; `SocketTimeout` покрывает обе версии Python |
+| `test/test_error_heartbeat.py` | При ошибке обработки пакеты продолжают идти и несут последнюю удачную картинку |
 | `seavision-win.spec` | ЕДИНАЯ штатная сборка Win7…Win11 (Python 3.8, PyInstaller 5, **без** `optimize=`, без matplotlib, без UPX) → `dist/seavision/` |
 | `seavision-win-debug.spec` | То же, но **С** matplotlib (Agg-backend) для `pics=<путь>` → `dist-debug/seavision/` |
 | `seavision.spec` | PyInstaller spec для локальной сборки (Linux/общий) |

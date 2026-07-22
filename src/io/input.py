@@ -3,7 +3,7 @@ import numpy as np
 from glob import glob
 from time import time
 from typing import Optional
-from src.io.service import create_inp_socket
+from src.io.service import create_inp_socket, SocketTimeout
 from src.io.structs import Navi, BackData, BackPack, \
     parse_navi_packet, parse_back_packet, ProtocolError, _NAV_PKT_SIZE, _BCK_PKT_SIZE, _BCK_PAYLOAD_SIZE
 from src.runtime.logger import setup_logger
@@ -77,14 +77,13 @@ class UdpInputSource(InputSource):
                        timeout: Optional[float] = None) -> BackPack:
         """
         Receive one datagram and parse into BackPacket.
-        Raises TimeoutError on socket timeout, ProtocolError on parse error.
+        Lets the socket timeout propagate (see SocketTimeout — its concrete class
+        differs between Python versions), raises ProtocolError on parse error.
         """
         old_timeout = self.back_socket.gettimeout()
         try:
             self.back_socket.settimeout(timeout)
             data, _addr = self.back_socket.recvfrom(bufsize)
-        except TimeoutError:
-            raise
         finally:
             self.back_socket.settimeout(old_timeout)
 
@@ -170,7 +169,9 @@ class UdpInputSource(InputSource):
 
             except ProtocolError:
                 continue
-            except TimeoutError:
+            except SocketTimeout:
+                # No packet within per_recv_timeout — keep waiting until the
+                # overall timeout expires (that one raises TimeoutError below).
                 continue
 
         n_recv = n_ready

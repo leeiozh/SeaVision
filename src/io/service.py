@@ -1,7 +1,18 @@
 import sys
-from socket import socket, error, AF_INET, SOCK_DGRAM, SOL_SOCKET, SO_RCVBUF, SO_SNDBUF
+from socket import (socket, error, timeout as _socket_timeout,
+                    AF_INET, SOCK_DGRAM, SOL_SOCKET, SO_RCVBUF, SO_SNDBUF)
 
 _FRAME_SIZE_BYTES = 4096 * 2 * 1032   # ≈ 8.45 MB
+
+# Catch socket read timeouts on every supported Python.
+#
+# On Python 3.10+ socket.timeout IS TimeoutError (they were merged), so a bare
+# `except TimeoutError` works.  On 3.8/3.9 they are DIFFERENT classes — both
+# derive from OSError, but socket.timeout is not a TimeoutError.  The Windows
+# bundle is built on 3.8 (Win7 compatibility), where a bare `except TimeoutError`
+# silently misses every socket timeout: what should be a quiet "no data yet"
+# wait turns into an "Input error" traceback.  Always catch this tuple.
+SocketTimeout = (_socket_timeout, TimeoutError)
 
 
 def create_inp_socket(ip, port, size=0):

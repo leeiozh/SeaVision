@@ -47,11 +47,21 @@ jobs:
       - name: Build EXE (debug, with matplotlib)
         run: pyinstaller seavision-win-debug.spec --distpath dist-debug --workpath build-debug
 
+      # Тесты гоняем на ТОМ ЖЕ Python 3.8, на котором собран бандл: часть ошибок
+      # видна только здесь (socket.timeout не является TimeoutError до 3.10).
+      - name: Run tests on Python 3.8
+        run: |
+          python test/test_idle_no_error.py
+          python test/test_error_heartbeat.py
+
       # Дым-тест на самом раннере (ядро Win10/11): бандл должен реально стартовать,
       # а не только собраться. config.ini слушает 127.0.0.1, радар не нужен —
-      # процессор уходит в состояние «ожидание данных» и продолжает жить.
-      # Ловит именно тот класс поломок, который не виден на этапе сборки:
-      # несовместимые DLL, битые импорты numpy/scipy, падение на старте.
+      # процессор уходит в «ожидание данных» и обязан ЖДАТЬ МОЛЧА.
+      # Ловит два класса поломок, невидимых на этапе сборки:
+      #   * падение старта (несовместимые DLL, битые импорты numpy/scipy);
+      #   * шум в штатном простое (напр. socket.timeout мимо except TimeoutError).
+      # 45 с не случайны: overall_timeout в get_bck = 30 с, т.е. окно должно
+      # пережить хотя бы один полный цикл ожидания.
       - name: Smoke test (Win10/11 kernel)
         shell: pwsh
         run: |
@@ -65,7 +75,7 @@ jobs:
                                -RedirectStandardOutput $log `
                                -RedirectStandardError $err `
                                -PassThru -NoNewWindow
-            Start-Sleep -Seconds 25
+            Start-Sleep -Seconds 45
             $exited = $p.HasExited
             if (-not $exited) { Stop-Process -Id $p.Id -Force }
             $out = (Get-Content $log -Raw -ErrorAction SilentlyContinue) + `
@@ -79,7 +89,11 @@ jobs:
               Write-Error "$d : в выводе нет 'Manager started'"
               exit 1
             }
-            Write-Host "$d : OK — стартовал и жив через 25 с"
+            if ($out -match 'Input error|Traceback') {
+              Write-Error "$d : простой без данных должен быть молчаливым, а в выводе есть ошибка"
+              exit 1
+            }
+            Write-Host "$d : OK — стартовал, жив через 45 с, простой молчаливый"
           }
 
       # Диагностика: какие системные DLL уехали в бандл. Полезно при разборе
