@@ -231,11 +231,13 @@ class CSVOutputSink(OutputSink):
         self.n_shots = constants.N_SHOTS
         self.n_dirs = constants.N_DIRS
 
-        # Keep file handles open — avoids repeated open/close churn on every result
-        self._f_params = open(save_path + prefix + "_params.csv", "w", buffering=1)
-        self._f_port   = open(save_path + prefix + "_port.csv",   "w", buffering=1)
-        self._f_spec   = open(save_path + prefix + "_spec.csv",   "w", buffering=1)
-        self._f_navi   = open(save_path + prefix + "_navi.csv",   "w", buffering=1)
+        # Keep file handles open — avoids repeated open/close churn on every result.
+        # encoding is explicit: the default is the Windows locale codepage, which
+        # cannot represent a non-ASCII installation_id and would raise mid-run.
+        self._f_params = open(save_path + prefix + "_params.csv", "w", buffering=1, encoding="utf-8")
+        self._f_port   = open(save_path + prefix + "_port.csv",   "w", buffering=1, encoding="utf-8")
+        self._f_spec   = open(save_path + prefix + "_spec.csv",   "w", buffering=1, encoding="utf-8")
+        self._f_navi   = open(save_path + prefix + "_navi.csv",   "w", buffering=1, encoding="utf-8")
 
         self._f_params.write("datetime;pulse;step;swh;t_p;d_p;d_m;t_m;freq;\n")
         self._f_port.write(f"({self.n_shots},{self.k_num})\n")

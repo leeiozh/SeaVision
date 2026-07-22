@@ -1,6 +1,10 @@
+import os
 from configparser import ConfigParser
 from dataclasses import dataclass
 from typing import Optional
+from src.runtime.logger import setup_logger
+
+log = setup_logger("config")
 
 
 @dataclass(frozen=True)
@@ -51,9 +55,33 @@ class AppConfig:
     const: Constants
 
 
+def _read_ini(cfg: ConfigParser, path: str):
+    """Read the ini in whatever encoding the operator's editor produced.
+
+    ConfigParser.read() defaults to the *locale* codepage — cp1252/cp866 on
+    Windows — so a single Cyrillic comment in a UTF-8 config aborts startup with
+    UnicodeDecodeError before anything is logged.  Try UTF-8 (tolerating a BOM,
+    which Notepad adds), then the Russian ANSI codepage Notepad still writes,
+    and as a last resort read with replacement — a stray byte in a comment must
+    never stop the radar.
+    """
+    if not os.path.isfile(path):
+        log.warning(f"Config file not found: {path} — falling back to built-in defaults")
+        return
+    for enc in ("utf-8-sig", "cp1251"):
+        try:
+            cfg.read(path, encoding=enc)
+            return
+        except UnicodeDecodeError:
+            continue
+    log.warning(f"Config {path}: unknown encoding — reading with replacement")
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        cfg.read_file(fh)
+
+
 def load_config(path: str) -> AppConfig:
     cfg = ConfigParser(allow_no_value=True, inline_comment_prefixes=(";", "#"))
-    cfg.read(path)
+    _read_ini(cfg, path)
 
     # RPM may be a number (fixed, fractional ok) or false/auto/none (→ None: estimate live).
     _rpm_raw = (cfg.get("hardware", "RPM", fallback="25") or "").strip().lower()

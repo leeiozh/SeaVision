@@ -51,6 +51,7 @@ jobs:
       # видна только здесь (socket.timeout не является TimeoutError до 3.10).
       - name: Run tests on Python 3.8
         run: |
+          python test/test_config_encoding.py
           python test/test_idle_no_error.py
           python test/test_error_heartbeat.py
 

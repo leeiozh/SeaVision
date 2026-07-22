@@ -65,6 +65,7 @@ python buoy/analyze.py [--csv buoy/params.csv] [--spec buoy/spec] [--out buoy/fi
 
 Автономные тесты (без радара и сокетов), они же гоняются в CI на Python 3.8:
 ```bash
+python test/test_config_encoding.py     # config.ini читается в UTF-8/BOM/cp1251
 python test/test_idle_no_error.py       # простой без данных — молча
 python test/test_error_heartbeat.py     # ошибка обработки — пакеты идут, картинка держится
 ```
@@ -99,6 +100,8 @@ test/tester_receive.py      ← визуализация
 | Processing exception | немедленный `_restart_processor()` |
 | Processor hang > `10 × rot_period` | watchdog → `_restart_processor()` |
 | Output sink error | логируется per-sink, остальные sinks продолжают работу |
+
+**Кодировка ввода.** `load_config` читает ini через `_read_ini`: `utf-8-sig` → `cp1251` → utf-8 с заменой. Голый `ConfigParser.read()` берёт кодировку локали, и один русский комментарий в UTF-8-конфиге убивал старт на Windows ещё до первой строки лога. CSV-синк открывает файлы с явным `encoding="utf-8"` по той же причине. Тест: `test/test_config_encoding.py`.
 
 **Кодировка вывода.** `src/runtime/logger.py` при импорте переводит stdout/stderr в UTF-8 с `errors="replace"` (`_force_utf8_stdio`). Причина: логи и прогресс-бар содержат `—`, `→`, `°`, `█`, `░`, а перенаправленный stdout на Windows берёт кодировку локали (cp1252 / cp866) — ни одна из них не покрывает весь набор, и `UnicodeEncodeError` летит **из `print()` внутри потока Process, убивая его** (пайплайн уходит в вечный цикл рестартов). Вторая линия защиты — `_stdout_can_encode()` в `manager.py`: глифы бара и `→`/`°` подменяются ASCII, если поток всё же не UTF-8. Регрессия закрыта `test_survives_legacy_codepage_stdout` (гоняет пайплайн под настоящим cp1252-stdout).
 
@@ -320,6 +323,7 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 | `test/tester_receive.py` | Визуализация UDP v2.0 (1412 байт): 1D спектр + полярный спектр + таблица |
 | `test/tester_receive_old.py` | Визуализация **старого** протокола (1398 байт, `sv_protocol_2204.docx`) |
 | `test/tester_transmit.py` | Генератор тестового потока |
+| `test/test_config_encoding.py` | config.ini грузится в UTF-8 / UTF-8+BOM / cp1251; отсутствующий файл → warning + дефолты |
 | `test/test_idle_no_error.py` | Простой без данных молчит; `SocketTimeout` покрывает обе версии Python |
 | `test/test_error_heartbeat.py` | При ошибке обработки пакеты продолжают идти и несут последнюю удачную картинку |
 | `seavision-win.spec` | ЕДИНАЯ штатная сборка Win7…Win11 (Python 3.8, PyInstaller 5, **без** `optimize=`, без matplotlib, без UPX) → `dist/seavision/` |
