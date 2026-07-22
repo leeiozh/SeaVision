@@ -1,4 +1,5 @@
 import copy
+import sys
 from time import sleep, time
 from queue import Queue, Empty, Full
 from threading import Thread, Event, Lock
@@ -16,6 +17,22 @@ _STATE_RESET = 3   # reset / restart
 _STATE_ERROR = 4   # error
 
 _STATUS_INTERVAL = 1.0   # min seconds between throttled status heartbeats
+
+
+def _stdout_can_encode(text: str) -> bool:
+    """True if text survives a write to stdout.
+
+    Second line of defence behind logger._force_utf8_stdio(): if stdout could not
+    be switched to UTF-8 (exotic wrapper, stream without reconfigure), fall back
+    to ASCII glyphs rather than raise UnicodeEncodeError mid-print and kill the
+    thread.  Checked at runtime, not import time, so it sees the final encoding.
+    """
+    enc = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        text.encode(enc)
+        return True
+    except (UnicodeEncodeError, LookupError):
+        return False
 
 
 def _drain(q: Queue):
@@ -246,9 +263,14 @@ class Manager:
         _frames_since_out = 0
         _bar_active = False   # True when a \r line is pending (needs \n to close)
 
+        # Glyphs the current stdout can actually encode (see _stdout_can_encode)
+        _g_full, _g_empty = ('█', '░') if _stdout_can_encode('█░') else ('#', '-')
+        _g_arrow = '→' if _stdout_can_encode('→') else '->'
+        _g_deg   = '°' if _stdout_can_encode('°') else ' deg'
+
         def _bar(filled, total):
             n = int(_bar_w * min(filled, total) / total)
-            return '█' * n + '░' * (_bar_w - n)
+            return _g_full * n + _g_empty * (_bar_w - n)
 
         while not self.stop_ev.is_set() and not stop_ev.is_set():
             try:
@@ -304,14 +326,14 @@ class Manager:
             curr_spd = getattr(o, 'curr_speed', 0.0)
             curr_dir = getattr(o, 'curr_dir',   0.0)
             print(
-                f'  → Hs={o.wave_sum.swh:.2f}m  Tp={o.wave_sum.t_p:.1f}s  '
-                f'Dp={o.wave_sum.d_p:.0f}°  Nsys={o.ide_sys}  '
-                f'Curr={curr_spd:.2f}m/s@{curr_dir:.0f}°  '
+                f'  {_g_arrow} Hs={o.wave_sum.swh:.2f}m  Tp={o.wave_sum.t_p:.1f}s  '
+                f'Dp={o.wave_sum.d_p:.0f}{_g_deg}  Nsys={o.ide_sys}  '
+                f'Curr={curr_spd:.2f}m/s@{curr_dir:.0f}{_g_deg}  '
                 f'{"GOOD" if o.n_dis else "BAD"}  calc={_dt:.1f}s'
             )
             log.info(
                 f"Hs={o.wave_sum.swh:.2f}m  Tp={o.wave_sum.t_p:.1f}s  "
-                f"Dp={o.wave_sum.d_p:.0f}°  Curr={curr_spd:.2f}m/s  "
+                f"Dp={o.wave_sum.d_p:.0f}{_g_deg}  Curr={curr_spd:.2f}m/s  "
                 f"Nsys={o.ide_sys}  calc={_dt:.1f}s"
             )
 

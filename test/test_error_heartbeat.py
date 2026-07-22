@@ -16,6 +16,7 @@ Drives the real Manager pipeline and checks two things on the wire format:
 
 Run:  python test/test_error_heartbeat.py        (no radar / sockets needed)
 """
+import io
 import os
 import sys
 import time
@@ -27,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.io.structs import BackData, Navi, Output, Wave
 from src.io.output import OutputSink, UdpOutputSink
-from src.runtime.manager import Manager, _STATE_ERROR, _STATE_RESET
+from src.runtime.manager import Manager, _STATE_ERROR, _STATE_RESET, _STATE_READY
 
 
 # ── minimal config doubles ──────────────────────────────────────────────────
@@ -147,6 +148,33 @@ def _run(processor_cls, seconds=2.0):
         return list(sink.records)
 
 
+def test_survives_legacy_codepage_stdout():
+    """A cp1252/cp866 stdout must not kill the Process thread.
+
+    Reproduces the real failure: the progress bar prints █/░ and the result line
+    prints →/°, none of which exist in cp1252.  With a redirected stdout on
+    English Windows, print() raised UnicodeEncodeError inside _process_loop and
+    the thread died, leaving the pipeline in an endless restart loop (only RESET
+    packets, never a result).  Run under a genuinely narrow codepage here.
+    """
+    saved = sys.stdout
+    buf = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict",
+                           newline="", write_through=True)
+    sys.stdout = buf
+    try:
+        recs = _run(GoodThenRaising)
+    finally:
+        sys.stdout = saved
+
+    good = [r for r in recs if r["state"] == _STATE_READY]
+    assert good, (
+        "FAIL: no result under a cp1252 stdout — the Process thread most likely "
+        f"died on a print(); states seen: {sorted({r['state'] for r in recs})}"
+    )
+    print(f"PASS [cp1252 stdout]: pipeline kept running, {len(good)} result packet(s) "
+          f"— printing falls back to ASCII glyphs instead of raising.")
+
+
 def test_error_keeps_picture():
     recs = _run(GoodThenRaising)
     assert recs, "FAIL: no packets emitted at all"
@@ -185,6 +213,7 @@ def test_error_from_start_is_zeroed():
 
 
 if __name__ == "__main__":
+    test_survives_legacy_codepage_stdout()
     test_error_keeps_picture()
     test_error_from_start_is_zeroed()
     print("ALL TESTS PASSED")
