@@ -1,4 +1,5 @@
 import numpy as np
+from src.algorithms.spectrum2d import fft_axis
 
 # ── Thresholds for calc_current_multiwave ────────────────────────────────────
 _MULTI_DIR_HALF_DEG = 45.0   # half-width of directional cone per system [deg]
@@ -35,7 +36,7 @@ def calc_current_vector(spec_3d, k_max, om_max, band, sog=0.0, cog_deg=0.0, max_
     KX, KY = np.meshgrid(kx_arr, ky_arr, indexing='ij')
     K_abs = np.sqrt(KX ** 2 + KY ** 2)
 
-    om_arr = np.linspace(0, om_max, n_om)
+    om_arr = fft_axis(om_max, n_om)
     omega_ref = np.sqrt(9.81 * K_abs)
 
     k_lo = k_max * 0.08
@@ -55,7 +56,7 @@ def calc_current_vector(spec_3d, k_max, om_max, band, sog=0.0, cog_deg=0.0, max_
         eq_A, eq_b, eq_w = [], [], []
         for i, j in zip(i_vals, j_vals):
             om_ctr = float(omega_ref[i, j] + KX[i, j] * Ux_p + KY[i, j] * Uy_p)
-            ci = int(round(om_ctr / om_max * (n_om - 1)))
+            ci = int(round(om_ctr / om_max * n_om))
             ci = max(0, min(n_om - 1, ci))
             lo = max(1, ci - win)
             hi = min(n_om, ci + win + 1)
@@ -86,7 +87,7 @@ def calc_current_vector(spec_3d, k_max, om_max, band, sog=0.0, cog_deg=0.0, max_
         eq_A, eq_b, eq_w = [], [], []
         for i, j in zip(i_vals, j_vals):
             om_ctr = float(omega_ref[i, j] + KX[i, j] * Ux_p + KY[i, j] * Uy_p)
-            ci = int(round(om_ctr / om_max * (n_om - 1)))
+            ci = int(round(om_ctr / om_max * n_om))
             ci = max(0, min(n_om - 1, ci))
             lo = max(1, ci - win)
             hi = min(n_om, ci + win + 1)
@@ -171,7 +172,7 @@ def calc_current_multiwave(spec_3d_ship, k_max, om_max, systems_draft, band):
     k_phys   = K_abs
     phi      = np.arctan2(KY, KX)
 
-    om_arr    = np.linspace(0, om_max, n_om)
+    om_arr    = fft_axis(om_max, n_om)
     omega_ref = np.sqrt(9.81 * k_phys)
 
     dir_half = np.deg2rad(_MULTI_DIR_HALF_DEG)
@@ -216,7 +217,7 @@ def calc_current_multiwave(spec_3d_ship, k_max, om_max, systems_draft, band):
             for i, j in zip(i_v, j_v):
                 om_ref_ij = float(omega_ref[i, j])
                 om_ctr    = om_ref_ij + float(KX[i, j]) * Ucx_p + float(KY[i, j]) * Ucy_p
-                ci = int(round(om_ctr / om_max * (n_om - 1)))
+                ci = int(round(om_ctr / om_max * n_om))
                 ci = max(0, min(n_om - 1, ci))
                 lo = max(1,    ci - win)
                 hi = min(n_om, ci + win + 1)

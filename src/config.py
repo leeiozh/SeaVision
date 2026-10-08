@@ -38,7 +38,7 @@ class Constants:
     K_NUM:        int = 32
     NUM_AREA:     int = 8
     N_FREQ_2D:    int = 36
-    ALGO_VERSION: int = 1   # increment when algorithm behaviour changes
+    ALGO_VERSION: int = 2   # increment when algorithm behaviour changes
 
 
 @dataclass(frozen=True)

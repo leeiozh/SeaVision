@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter, gaussian_filter1d
+from src.algorithms.spectrum2d import parabolic_offset
 
 # ── Thresholds for calc_partitions ───────────────────────────────────────────
 _PART_MIN_DIR_SEP     = 25.0   # min angular separation [deg] for two distinct systems
@@ -137,9 +138,12 @@ def find_system_dirs(s_om_th, freq_peaks, omega_vals, dir_array):
             continue
 
         dir_idx = int(np.argmax(dir_prof))
+        n_d     = len(dir_prof)
+        dir_off = parabolic_offset(
+            dir_prof[dir_idx - 1], dir_prof[dir_idx], dir_prof[(dir_idx + 1) % n_d])
         result.append({
             **peak,
-            "dir_deg": float(dir_array[dir_idx]),
+            "dir_deg": float((dir_array[dir_idx] + dir_off * 360.0 / n_d) % 360),
             "dir_idx": dir_idx,
         })
 
@@ -208,8 +212,15 @@ def calc_partitions(s_om_th, omega_vals, dir_array, wdir, swh):
         d_idx, om_idx = divmod(p, n_om)
 
         om_peak = omega_vals[om_idx] if om_idx < len(omega_vals) else 0.0
-        t_p     = float(2 * np.pi / om_peak) if om_peak > 0 else 0.0
         d_p     = float(dir_array[d_idx])    if d_idx < len(dir_array) else 0.0
+        # sub-bin peak position along both axes (direction axis is circular)
+        if 0 < om_idx < n_om - 1:
+            om_peak += (omega_vals[1] - omega_vals[0]) * parabolic_offset(
+                spec[d_idx, om_idx - 1], spec[d_idx, om_idx], spec[d_idx, om_idx + 1])
+        d_p = float((d_p + 360.0 / num_area * parabolic_offset(
+            spec[d_idx - 1, om_idx], spec[d_idx, om_idx],
+            spec[(d_idx + 1) % num_area, om_idx])) % 360)
+        t_p     = float(2 * np.pi / om_peak) if om_peak > 0 else 0.0
 
         sys_energy = float(
             spec[

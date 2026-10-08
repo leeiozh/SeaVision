@@ -7,7 +7,7 @@ from src.processing.averaging import Averager
 from src.algorithms.area import Area
 from src.algorithms.dispersion import calc_current_vector, calc_current_multiwave
 from src.algorithms.spectrum2d import (
-    calc_spec3d, calc_port,
+    calc_spec3d, calc_port, fft_axis,
     apply_doppler_3d_vec,
     separate_signal_noise, apply_mtf,
     compute_snr, compute_frequency_spectrum,
@@ -406,8 +406,8 @@ class Processor:
 
             k_max     = np.pi / cst.ASP / s.curr_step * cst.K_NUM
             half      = cst.N_SHOTS // 2
-            omega_vals = np.linspace(0, self.om_max, half)
-            k_vals    = np.linspace(0, k_max, cst.K_NUM)
+            omega_vals = fft_axis(self.om_max, half)
+            k_vals    = fft_axis(k_max, cst.K_NUM)
 
             spec_3d_corr = np.zeros((half, 2 * cst.K_NUM, 2 * cst.K_NUM),
                                     dtype=np.float32)
@@ -543,7 +543,7 @@ class Processor:
                 np.linspace(0, self.om_max, cst.N_FREQ), omega_vals, s_omega)
             _om_out = np.linspace(0, self.om_max, cst.N_FREQ_2D)
             spec_2d = np.vstack([
-                np.interp(_om_out, omega_vals, row, left=0.0, right=0.0)
+                np.interp(_om_out, omega_vals, row, left=0.0)
                 for row in s_om_th
             ])
 

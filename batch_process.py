@@ -33,7 +33,7 @@ from src.config import load_config
 from src.io.input import NCInputSource
 from src.algorithms.area import Area
 from src.algorithms.spectrum2d import (
-    calc_spec3d, calc_port,
+    calc_spec3d, calc_port, fft_axis,
     apply_doppler_3d_vec,
     separate_signal_noise, apply_mtf,
     compute_snr, compute_frequency_spectrum,
@@ -143,7 +143,7 @@ def _dispersion_centroids(spec_3d, k_max, om_max, sog=0.0, cog_deg=0.0):
     ky_arr = np.arange(-k_num, k_num, dtype=float) / k_num * k_max
     KX, KY = np.meshgrid(kx_arr, ky_arr, indexing='ij')
     K_abs  = np.sqrt(KX ** 2 + KY ** 2)
-    om_arr = np.linspace(0, om_max, n_om)
+    om_arr = fft_axis(om_max, n_om)
     omega_ref = np.sqrt(9.81 * K_abs)
 
     k_lo = k_max * 0.08
@@ -158,7 +158,7 @@ def _dispersion_centroids(spec_3d, k_max, om_max, sog=0.0, cog_deg=0.0):
     k_list, om_list, w_list = [], [], []
     for i, j in zip(i_vals, j_vals):
         om_ctr = float(omega_ref[i, j] + KX[i, j] * Ux_prior + KY[i, j] * Uy_prior)
-        ci = int(round(om_ctr / om_max * (n_om - 1)))
+        ci = int(round(om_ctr / om_max * n_om))
         ci = max(0, min(n_om - 1, ci))
         lo = max(1, ci - win)
         hi = min(n_om, ci + win + 1)
@@ -834,8 +834,8 @@ def _compute_from_frames(name, frames, cfg, spec_dir, pics_dir, log, wind_meta=N
     step      = 1.875
     k_max     = np.pi / cst.ASP / step * cst.K_NUM
     half      = cst.N_SHOTS // 2
-    omega_vals = np.linspace(0, om_max, half)
-    k_vals     = np.linspace(0, k_max, cst.K_NUM)
+    omega_vals = fft_axis(om_max, half)
+    k_vals     = fft_axis(k_max, cst.K_NUM)
     dir_array  = np.linspace(0, 360, cst.N_DIRS, endpoint=False)
 
     cbck      = frames['cbck']

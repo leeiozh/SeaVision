@@ -54,6 +54,8 @@ jobs:
           python test/test_config_encoding.py
           python test/test_idle_no_error.py
           python test/test_error_heartbeat.py
+          python test/test_no_cmd_spawn.py
+          python test/test_spectral_axes.py
 
       # Дым-тест на самом раннере (ядро Win10/11): бандл должен реально стартовать,
       # а не только собраться. config.ini слушает 127.0.0.1, радар не нужен —

@@ -8,6 +8,30 @@ except ImportError:          # scipy < 1.11 (Win7 bundle: scipy==1.10.1)
 from scipy.ndimage import gaussian_filter, gaussian_filter1d
 
 
+# ── spectral axes & peak refinement ──────────────────────────────────────────
+
+def fft_axis(v_max, n):
+    """Bin centres of an n-bin FFT half-axis whose Nyquist value is v_max.
+
+    Bin i sits at i·v_max/n, so the last bin is v_max·(n−1)/n — one step short
+    of Nyquist.  linspace(0, v_max, n) stretches the axis by n/(n−1): 0.8 % in ω
+    at n=128 and 3.2 % in k at K_NUM=32.
+    """
+    return np.arange(n, dtype=float) * (v_max / n)
+
+
+def parabolic_offset(y_m, y_0, y_p):
+    """Sub-bin offset of a peak from the sample at its argmax and both neighbours.
+
+    Vertex of the parabola through the three points, in bins, clipped to ±0.5.
+    Returns 0 when the points do not form a maximum.
+    """
+    den = float(y_m) - 2.0 * float(y_0) + float(y_p)
+    if den >= 0.0:
+        return 0.0
+    return float(np.clip(0.5 * (float(y_m) - float(y_p)) / den, -0.5, 0.5))
+
+
 # ── 3-D spectrum ─────────────────────────────────────────────────────────────
 
 def calc_spec3d(cbck_i, k_num, offset=0):
@@ -133,6 +157,10 @@ def compute_frequency_spectrum(signal_mtf, k_vals, omega_vals):
 
     peak_idx = int(np.nanargmax(s_omega))
     om_peak = omega_vals[peak_idx]
+    if 0 < peak_idx < len(s_omega) - 1:
+        # sub-bin peak: argmax alone quantises T_peak to the ω grid
+        om_peak += (omega_vals[1] - omega_vals[0]) * parabolic_offset(
+            s_omega[peak_idx - 1], s_omega[peak_idx], s_omega[peak_idx + 1])
     T_peak = float(2 * np.pi / om_peak) if om_peak > 0 else 0.0
 
     denom = float(np.sum(s_omega))
@@ -167,7 +195,8 @@ def calc_spec2d(spec_3d_corr, omega_vals, k_max, num_area, band=7):
     dir_idx = (np.rint(phi / (2 * np.pi) * num_area)).astype(int) % num_area
 
     omega_ref = np.sqrt(9.81 * k_abs)
-    om_idx = np.rint(omega_ref / omega_vals[-1] * n_om).astype(int).clip(0, n_om - 1)
+    d_om = omega_vals[1] - omega_vals[0]
+    om_idx = np.rint(omega_ref / d_om).astype(int).clip(0, n_om - 1)
 
     s_om_th = np.zeros((num_area, n_om), dtype=np.float32)
 
@@ -185,7 +214,9 @@ def calc_spec2d(spec_3d_corr, omega_vals, k_max, num_area, band=7):
     # Peak direction
     s_dir = s_om_th.sum(axis=1)
     peak_idx = int(np.argmax(s_dir))
-    peak_dir = float(peak_idx / num_area * 360)
+    peak_off = parabolic_offset(
+        s_dir[peak_idx - 1], s_dir[peak_idx], s_dir[(peak_idx + 1) % num_area])
+    peak_dir = float((peak_idx + peak_off) / num_area * 360 % 360)
 
     # Mean direction (circular)
     theta = np.linspace(0, 2 * np.pi, num_area, endpoint=False)

@@ -68,6 +68,8 @@ python buoy/analyze.py [--csv buoy/params.csv] [--spec buoy/spec] [--out buoy/fi
 python test/test_config_encoding.py     # config.ini читается в UTF-8/BOM/cp1251
 python test/test_idle_no_error.py       # простой без данных — молча
 python test/test_error_heartbeat.py     # ошибка обработки — пакеты идут, картинка держится
+python test/test_no_cmd_spawn.py        # старт не запускает cmd.exe (закрытая система, DisableCMD)
+python test/test_spectral_axes.py       # оси на бинах FFT; суб-биновые пики T_p / D_p
 ```
 Линтера нет; интеграционное тестирование — через `tester_receive.py` с живыми данными или файлами.
 
@@ -100,6 +102,8 @@ test/tester_receive.py      ← визуализация
 | Processing exception | немедленный `_restart_processor()` |
 | Processor hang > `10 × rot_period` | watchdog → `_restart_processor()` |
 | Output sink error | логируется per-sink, остальные sinks продолжают работу |
+
+**Старт не должен порождать дочерних процессов (закрытая операторская система).** `platform.win32_ver()` в Python 3.8 узнаёт версию ОС командой `ver` через `cmd.exe`; `numpy.testing` дёргает `platform.machine()` на импорте, а его тянут `scipy.signal`/`scipy.optimize`. При политике `DisableCMD=1` cmd.exe пишет «отключено администратором, нажмите любую клавишу» в pipe и ждёт клавишу на нашей консоли → чёрное окно, импорт не завершается, пакетов нет. Лечение: `src/runtime/winguard.py` (`disable_cmd_probe`, вызывается из `src/__init__.py` до импорта numpy/scipy) подменяет `platform._syscmd_ver` заглушкой. Не добавлять `subprocess`/`os.system`/`os.popen`/`shell=True` в рабочий путь. В `main.py`: строка `SeaVision: loading...` до тяжёлых импортов и `faulthandler`-дамп стеков, если за 120 с не дошли до `Manager started`; `config.ini` ищется в рабочей папке, затем рядом с exe. Тест: `test/test_no_cmd_spawn.py`.
 
 **Кодировка ввода.** `load_config` читает ini через `_read_ini`: `utf-8-sig` → `cp1251` → utf-8 с заменой. Голый `ConfigParser.read()` берёт кодировку локали, и один русский комментарий в UTF-8-конфиге убивал старт на Windows ещё до первой строки лога. CSV-синк открывает файлы с явным `encoding="utf-8"` по той же причине. Тест: `test/test_config_encoding.py`.
 
@@ -157,6 +161,12 @@ test/tester_receive.py      ← визуализация
 9. 1D спектр → `T_peak`, `T_mean`, `m0`, `snr_tot`.
 10. `calc_spec2d(spec_3d_fixed, ...)` → `s_om_th`, `peak_dir`, `mean_dir`.
 11. `calc_partitions` → системы. Каждая система: `{h_s, t_p, d_p}` — **только пиковые значения**, средние не вычисляются. `wave_sum.t_m` и `wave_sum.d_m` вычисляются из 1D спектра и `calc_spec2d`, не из partitioning.
+
+### Спектральные оси и положение пиков (ALGO_VERSION 2)
+
+- **Оси — только через `fft_axis(v_max, n)`** (`spectrum2d.py`): бин `i` лежит на `i·v_max/n`, последний бин — на шаг ниже Найквиста. `linspace(0, v_max, n)` растягивал ω на `n/(n−1)` (0.8 % при 128 бинах) и k на 3.2 % (K_NUM=32). В регрессии тока это давало ложный снос вдоль направления волн ≈ 0.8 % фазовой скорости (~0.15 м/с при T=12 с). Индекс бина по частоте — `round(ω/om_max·n_om)`, как в `apply_doppler_3d_vec`. Выходные оси пакета (`spec_1d`/`spec_2d`, `linspace(0, om_max, N)`) не менялись — это ось приёмника.
+- **Пики — с параболическим уточнением** (`parabolic_offset`): `T_peak` (1D), `peak_dir`, `t_p`/`d_p` систем в `calc_partitions`, `dir_deg` в `find_system_dirs`. Раньше argmax квантовал период по сетке ω, а направления — по 10°.
+- Смена осей сдвинула масштаб MTF (`k^-1.2`) и положение полосы сигнала: `snr_tot` вырос на ~2–3 %, SWH при тех же `SNR_A/B` — на ~1 %.
 
 ### Ток (течение)
 
@@ -306,7 +316,7 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 | `src/processing/processor.py` | Главный процессор; `_SIGNAL_BAND=10`; `_MAX_CURRENT=3.0`; debug-функции с ленивым импортом matplotlib |
 | `src/processing/state.py` | `ProcessorState` |
 | `src/processing/averaging.py` | `Averager(mean, n_freq, n_freq_2d, n_dirs, n_shots, cut_num)` — кольцевой буфер, нормировка в [0,255]; возвращает `(Output, port)` |
-| `src/algorithms/spectrum2d.py` | `calc_spec3d`, `calc_port`, `apply_doppler_3d_vec`, `separate_signal_noise`, `apply_mtf`, `compute_snr`, `compute_frequency_spectrum`, `calc_spec2d` |
+| `src/algorithms/spectrum2d.py` | `fft_axis`, `parabolic_offset`, `calc_spec3d`, `calc_port`, `apply_doppler_3d_vec`, `separate_signal_noise`, `apply_mtf`, `compute_snr`, `compute_frequency_spectrum`, `calc_spec2d` |
 | `src/algorithms/dispersion.py` | `calc_current_vector`, `calc_current_multiwave`; `_MULTI_MAX_CURRENT=3.0` |
 | `src/algorithms/partition.py` | `calc_wspd`, `find_freq_peaks`, `find_system_dirs`, `calc_partitions`; системы возвращают только `{h_s, t_p, d_p}` |
 | `src/algorithms/area.py` | `Area.calc_mask()` |
@@ -316,6 +326,7 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 | `src/io/input.py` | `UdpInputSource` (get_bck возвращает copy), `NCInputSource`, `BT8InputSource` |
 | `src/io/service.py` | UDP-сокеты |
 | `src/runtime/manager.py` | Трёхпоточный пайплайн с watchdog |
+| `src/runtime/winguard.py` | `disable_cmd_probe()` — запрет запуска `cmd.exe` из stdlib на старте (DisableCMD) |
 | `src/runtime/logger.py` | `setup_logger()` — настройка форматированного лога |
 | `config.ini` | Продакшн UDP (pics=false, type=udp) |
 | `config_debug.ini` | Отладка (type=nc, N_SHOTS=64, pics=./, file=true) |
@@ -326,6 +337,8 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 | `test/test_config_encoding.py` | config.ini грузится в UTF-8 / UTF-8+BOM / cp1251; отсутствующий файл → warning + дефолты |
 | `test/test_idle_no_error.py` | Простой без данных молчит; `SocketTimeout` покрывает обе версии Python |
 | `test/test_error_heartbeat.py` | При ошибке обработки пакеты продолжают идти и несут последнюю удачную картинку |
+| `test/test_no_cmd_spawn.py` | Импорт и `platform.*` не порождают процессов (ловушка на `subprocess.Popen`) |
+| `test/test_spectral_axes.py` | `fft_axis` совпадает с бинами FFT; `T_peak`, `t_p`/`d_p` систем находятся между бинами |
 | `seavision-win.spec` | ЕДИНАЯ штатная сборка Win7…Win11 (Python 3.8, PyInstaller 5, **без** `optimize=`, без matplotlib, без UPX) → `dist/seavision/` |
 | `seavision-win-debug.spec` | То же, но **С** matplotlib (Agg-backend) для `pics=<путь>` → `dist-debug/seavision/` |
 | `seavision.spec` | PyInstaller spec для локальной сборки (Linux/общий) |
@@ -362,7 +375,7 @@ ProcessResult(output: Output, port: ndarray, navi: Navi)
 
 **Захардкожены в `src/config.py:Constants`, не в config.ini** (версия алгоритма/протокола):
 ```
-N_FREQ=64  N_DIRS=36  K_NUM=32  NUM_AREA=8  N_FREQ_2D=36  ALGO_VERSION=1
+N_FREQ=64  N_DIRS=36  K_NUM=32  NUM_AREA=8  N_FREQ_2D=36  ALGO_VERSION=2
 ```
 `ALGO_VERSION` меняется только в `src/config.py` (поле `Constants.ALGO_VERSION`).
 

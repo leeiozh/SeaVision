@@ -1,6 +1,19 @@
+import os
 import sys
 import ctypes
+import faulthandler
 from time import sleep
+
+# First sign of life, before the heavy numpy/scipy imports below: if the window
+# then stays empty, startup is stuck in an import, not in our code.  And if
+# "Manager started" is not reached in _STARTUP_DUMP_S, every thread's stack is
+# dumped to the console — the hang names itself (cancelled once we are up).
+_STARTUP_DUMP_S = 120
+if sys.stdout is not None:
+    print("SeaVision: loading...", flush=True)
+if sys.stderr is not None:
+    faulthandler.dump_traceback_later(_STARTUP_DUMP_S, exit=False)
+
 from src.config import load_config
 from src.runtime.manager import Manager
 from src.processing.processor import Processor
@@ -28,6 +41,20 @@ def _disable_quick_edit():
         kernel32.SetConsoleMode(handle, mode)
     except Exception:
         pass
+
+
+def _default_config_path():
+    """config.ini from the working directory, else from next to the exe.
+
+    A launcher (shortcut, shell replacement, service) may start the bundle with
+    a working directory that is not the install folder.
+    """
+    name = "config.ini"
+    if not os.path.isfile(name) and getattr(sys, "frozen", False):
+        beside_exe = os.path.join(os.path.dirname(sys.executable), name)
+        if os.path.isfile(beside_exe):
+            return beside_exe
+    return name
 
 
 def _build_source(cfg):
@@ -84,7 +111,7 @@ def _build_sinks(cfg):
 def main():
     _disable_quick_edit()
     log = setup_logger("main")
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "config.ini"
+    config_path = sys.argv[1] if len(sys.argv) > 1 else _default_config_path()
     cfg = load_config(config_path)
     log.info(f"Config: {config_path}")
 
@@ -103,6 +130,7 @@ def main():
     )
     manager.start()
     log.info("Manager started")
+    faulthandler.cancel_dump_traceback_later()
 
     try:
         while True:
